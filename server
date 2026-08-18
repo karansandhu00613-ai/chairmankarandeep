@@ -1,0 +1,93 @@
+#!/usr/bin/env node
+/* Chairman OS — Command Core
+   Zero-dependency Node static server. No npm install needed.
+
+   RUN IT:   node server.js
+   Then open http://localhost:3000
+   Your browser will pop up a real login box (HTTP Basic Auth). Enter the
+   ID and password below (or your own, set via environment variables) —
+   without them, nobody gets past a 401 "Access denied" response. This is
+   a genuine, server-enforced check, not a client-side JS gate that anyone
+   could bypass by reading the page source.
+
+   SET YOUR OWN CREDENTIALS (recommended before you put this on the
+   internet — do this instead of trusting the defaults below):
+
+     CHAIRMAN_USER=yourid CHAIRMAN_PASS=yourpassword node server.js
+
+   If you don't set them, it falls back to the defaults printed below —
+   fine for trying it out on your own machine, not fine for the open web.
+
+   This serves dashboard.html exactly as-is once you're past the login.
+   All the interactivity (agents, console, finances, activity log) runs
+   client-side in the browser — this server's job is (1) check the login,
+   then (2) hand over the file.
+*/
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const PORT = process.env.PORT || 3000;
+const FILE = path.join(__dirname, 'dashboard.html');
+const USER = process.env.CHAIRMAN_USER || 'chairman';
+const PASS = process.env.CHAIRMAN_PASS || 'gold-command-2026';
+
+function timingSafeEqual(a, b) {
+  // Constant-time-ish string compare so a login attempt can't be timed
+  // character-by-character to guess the password.
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) {
+    // still run a comparison so early return doesn't leak length as fast
+    require('crypto').timingSafeEqual(bufA, Buffer.alloc(bufA.length));
+    return false;
+  }
+  return require('crypto').timingSafeEqual(bufA, bufB);
+}
+
+function isAuthorized(req) {
+  const header = req.headers['authorization'] || '';
+  if (!header.startsWith('Basic ')) return false;
+  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+  const idx = decoded.indexOf(':');
+  if (idx === -1) return false;
+  const user = decoded.slice(0, idx);
+  const pass = decoded.slice(idx + 1);
+  return timingSafeEqual(user, USER) && timingSafeEqual(pass, PASS);
+}
+
+const server = http.createServer((req, res) => {
+  if (!isAuthorized(req)) {
+    res.writeHead(401, {
+      'Content-Type': 'text/plain',
+      'WWW-Authenticate': 'Basic realm="Chairman OS", charset="UTF-8"'
+    });
+    res.end('Access denied — ID and password required.');
+    return;
+  }
+  if (req.url !== '/' && req.url !== '/dashboard.html') {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not found');
+    return;
+  }
+  fs.readFile(FILE, (err, data) => {
+    if (err) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Could not read dashboard.html — make sure it is in the same folder as server.js.');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(data);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log('');
+  console.log('  Chairman OS — Command Core');
+  console.log('  running at http://localhost:' + PORT);
+  console.log('  serving:  ' + FILE);
+  console.log('  login ID:       ' + USER);
+  console.log('  login password: ' + (process.env.CHAIRMAN_PASS ? '(set by you via CHAIRMAN_PASS)' : PASS + '  <-- default, change this before going public'));
+  console.log('  press Ctrl+C to stop');
+  console.log('');
+});
