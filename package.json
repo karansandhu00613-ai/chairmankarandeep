@@ -1,0 +1,33 @@
+{
+  "name": "chairman-agent-os",
+  "version": "4.0.0",
+  "description": "Autonomous agent OS with cloud deployment, real-time monitoring, and multi-tenant support",
+  "main": "chairman-enhanced.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node chairman-enhanced.js",
+    "dev": "NODE_ENV=development node chairman-enhanced.js",
+    "prod": "PRODUCTION=1 NODE_ENV=production node chairman-enhanced.js",
+    "test": "echo \"No tests yet\"",
+    "lint": "echo \"No linter configured\""
+  },
+  "keywords": [
+    "agent",
+    "os",
+    "monitoring",
+    "autonomous",
+    "cloud",
+    "real-time",
+    "websocket",
+    "saas",
+    "multi-tenant"
+  ],
+  "author": "Chairman Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=7.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
