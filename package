@@ -1,0 +1,13 @@
+{
+  "name": "chairman-os-command-core",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chairman OS - Command Core dashboard, zero-dependency Node server with login protection.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
