@@ -1,0 +1,86 @@
+# Chairman OS — Command Core
+
+A self-contained dashboard: an animated gold "command core" orb, an agent
+roster grouped by team, an activity log, a command console you can type
+plain instructions into, and a finance request log.
+
+## Run it for real, on your own machine or server
+
+```
+node server.js
+```
+
+Then open http://localhost:3000 — your browser will show a real login
+prompt (ID + password). This is enforced by the server itself, not by
+JavaScript in the page, so there's no way to bypass it by viewing source.
+
+**Default login** (only if you don't set your own — see below):
+- ID: `chairman`
+- Password: `gold-command-2026`
+
+**Set your own ID and password** (do this before putting it anywhere
+other people could reach):
+
+```
+CHAIRMAN_USER=youriD CHAIRMAN_PASS=yourpassword node server.js
+```
+
+No `npm install`, no dependencies — just Node's built-in `http`, `fs`,
+and `crypto` modules. Requires Node 14+. Tested: requests with no
+credentials or wrong credentials get a real `401 Access denied`;
+correct credentials get the dashboard.
+
+## What is genuinely live vs. what is not
+
+Everything you click, type, or toggle runs instantly in the browser
+(JavaScript in `dashboard.html`) — pausing an agent, creating a new one
+by typing a command, logging a transfer request. That is real, working
+code, not a mockup.
+
+What this does **not** do, on purpose: it does not send emails, does not
+call any external API, and does not move real money. The "Finances" tab
+logs a transfer request instantly, but there is no bank, PayPal, or
+crypto connection behind it — wiring that up for real would mean adding
+your own payment provider credentials (Stripe, PayPal Business, a bank
+payout API) and building a server-side integration, which is a separate,
+deliberate step with real financial risk if done carelessly.
+
+## Hosting it so only you can reach it, for free — the honest version
+
+`server.js` will serve the dashboard to anyone who can reach the machine
+it's running on, and now nobody gets in without the ID/password. What I
+cannot do from inside this chat session is create an account on a
+hosting platform on your behalf and push this app there myself — that
+needs your own login on that platform (same reason I used your own
+Lovable account earlier, rather than inventing hosting I don't have).
+I'm telling you this plainly instead of pretending it's done.
+
+What I *can* do: hand you this ready-to-run folder, already tested
+working with real login protection, so setting it up takes you a few
+minutes, not hours. Free options that run a Node app like this one
+persistently, with no credit card:
+
+- **Render** (free web service tier) — connect a GitHub repo, it detects
+  `node server.js`, add `CHAIRMAN_USER`/`CHAIRMAN_PASS` as environment
+  variables in their dashboard (never commit your password to the repo),
+  deploy. Free tier sleeps after inactivity and wakes on the next visit.
+- **Railway** (free trial credit, no card for the trial) — same flow:
+  push this folder to a GitHub repo, import it, set the two env vars,
+  deploy.
+- **Fly.io** (free allowance) — a bit more setup (their CLI + a small
+  config file) but runs full-time without sleeping.
+- **Replit** — paste this code into a Node repl, set the env vars as
+  "Secrets," click Run; simplest if you don't want to touch GitHub at
+  all, but the free tier's address can change and it sleeps when idle.
+
+Any of these gets you a real `https://` address, gated by the login this
+server now enforces, that only opens for someone who has the ID and
+password. If you already have an account on one of these, tell me which
+and I'll write out the exact copy-paste steps for that one. If you'd
+rather I do the deployment directly instead of you clicking through a
+setup, I can only do that on a platform where I have a genuine connected
+tool for it — right now that's your Lovable account, which is already
+live at the URL I gave you, just without a login gate (Lovable's own
+"Publish" flow doesn't currently expose a password-protect option
+through the tools I have — if you want that closed off too, the Node
+version here is the way to get it).
