@@ -1,1 +1,11 @@
 logs/
+node_modules/
+
+# Runtime state written by the services. Never commit: these hold account
+# records and session tokens, and on Render the disk is wiped anyway.
+karan-data.json
+karan-sessions.json
+data.json
+sessions.json
+dashboard-users.json
+dashboard-sessions.json
