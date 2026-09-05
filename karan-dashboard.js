@@ -3,8 +3,6 @@
 
 const http = require('http');
 const https = require('https');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '8000');
@@ -12,84 +10,96 @@ const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
 const CHAIRMAN_API = process.env.CHAIRMAN_API || 'http://localhost:8080';
 const JARVIS_API = process.env.JARVIS_API || 'http://localhost:8001';
 
-// Simple state with user accounts
-let STATE = {
-  users: {},
-  sessions: {}
-};
+const SESSION_TTL = 7 * 24 * 60 * 60 * 1000;
 
-const DB = 'dashboard-users.json';
-const SESSIONS_DB = 'dashboard-sessions.json';
+// Render's container disk is wiped on every redeploy and idle spin-down, so the
+// owner account and signing key come from environment variables instead of files.
+const OWNER_EMAIL = (process.env.OWNER_EMAIL || '').trim().toLowerCase();
+const OWNER_PASSWORD = process.env.OWNER_PASSWORD || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || '';
+const PASSWORD_SALT = process.env.PASSWORD_SALT || SESSION_SECRET;
 
-// Load from disk
-function loadState() {
-  try {
-    const data = fs.readFileSync(DB, 'utf8');
-    STATE.users = JSON.parse(data);
-  } catch(e) {
-    STATE.users = {};
-  }
+const MISSING_CONFIG = ['OWNER_EMAIL', 'OWNER_PASSWORD', 'SESSION_SECRET']
+  .filter(name => !process.env[name]);
+const CONFIGURED = MISSING_CONFIG.length === 0;
 
-  try {
-    const data = fs.readFileSync(SESSIONS_DB, 'utf8');
-    STATE.sessions = JSON.parse(data);
-  } catch(e) {
-    STATE.sessions = {};
-  }
+const OWNER_PW_HASH = CONFIGURED ? hashPassword(OWNER_PASSWORD, PASSWORD_SALT) : '';
+
+function hashPassword(pwd, salt) {
+  return crypto.pbkdf2Sync(pwd, salt, 100000, 32, 'sha256').toString('hex');
 }
 
-// Save to disk
-function saveUsers() {
-  fs.writeFileSync(DB, JSON.stringify(STATE.users, null, 2));
-}
-
-function saveSessions() {
-  fs.writeFileSync(SESSIONS_DB, JSON.stringify(STATE.sessions, null, 2));
-}
-
-// Password utilities
-function hashPassword(pwd) {
-  return crypto.pbkdf2Sync(pwd, 'salt', 100000, 32, 'sha256').toString('hex');
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
 function verifyPassword(pwd, hash) {
-  return hashPassword(pwd) === hash;
+  return safeEqual(hashPassword(pwd, PASSWORD_SALT), hash);
 }
 
-// Session utilities
+// Sessions are signed tokens rather than server-side records, so a restart no
+// longer invalidates a live login.
 function createSession(userId) {
-  const sessionId = crypto.randomBytes(32).toString('hex');
-  STATE.sessions[sessionId] = { userId, createdAt: Date.now() };
-  saveSessions();
-  return sessionId;
+  const payload = userId + ':' + (Date.now() + SESSION_TTL);
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return Buffer.from(payload).toString('base64url') + '.' + sig;
 }
 
-function verifySession(sessionId) {
-  const session = STATE.sessions[sessionId];
-  if (!session) return null;
-  const age = Date.now() - session.createdAt;
-  if (age > 7 * 24 * 60 * 60 * 1000) {
-    delete STATE.sessions[sessionId];
-    saveSessions();
-    return null;
-  }
-  return session.userId;
+function verifySession(token) {
+  if (!token || !CONFIGURED) return null;
+  const [encoded, sig] = String(token).split('.');
+  if (!encoded || !sig) return null;
+
+  const payload = Buffer.from(encoded, 'base64url').toString();
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  if (!safeEqual(sig, expected)) return null;
+
+  const [userId, expiresAt] = payload.split(':');
+  if (!userId || Number(expiresAt) < Date.now()) return null;
+  return userId;
+}
+
+function sessionCookie(req, token) {
+  const secure = req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+  return 'sessionId=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800' + secure;
+}
+
+function getSetupHTML() {
+  return `<!DOCTYPE html>
+<html>
+<head><title>Karan Dashboard - Setup</title><meta charset="utf-8">
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; padding: 40px; }
+  .box { background: white; padding: 32px; border-radius: 8px; max-width: 620px; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  li { margin: 10px 0; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Setup required</h1>
+    <p>Set these environment variables in the Render service, then redeploy:</p>
+    <ul>
+      ${MISSING_CONFIG.map(name => '<li><code>' + name + '</code></li>').join('')}
+    </ul>
+    <p><code>OWNER_EMAIL</code> and <code>OWNER_PASSWORD</code> are the only credentials that
+    can sign in. <code>SESSION_SECRET</code> should be a long random string.</p>
+  </div>
+</body>
+</html>`;
 }
 
 // HTTP Server
 const server = http.createServer(async (req, res) => {
-  const { pathname, query } = new URL(req.url, 'http://x');
-  const sessionId = new URL(req.url, 'http://x').searchParams.get('sessionId') ||
-                    (req.headers.cookie || '').match(/sessionId=([^;]+)/)?.[1];
+  const { pathname } = new URL(req.url, 'http://x');
+  const sessionId = (req.headers.cookie || '').match(/sessionId=([^;]+)/)?.[1];
   const userId = verifySession(sessionId);
 
-  // Set CORS & Cookie
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (sessionId) {
-    res.setHeader('Set-Cookie', `sessionId=${sessionId}; Path=/; HttpOnly; Max-Age=604800`);
-  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(200);
@@ -104,34 +114,25 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ status: 'ok' }));
     }
 
-    // Register
-    if (pathname === '/api/auth/register' && req.method === 'POST') {
+    if (!CONFIGURED) {
+      res.writeHead(503, { 'Content-Type': 'text/html' });
+      return res.end(getSetupHTML());
+    }
+
+    // Login. Single owner account; credentials come from the environment.
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
       let body = '';
       req.on('data', d => body += d);
       req.on('end', () => {
         try {
-          const { email, name, password } = JSON.parse(body);
-          if (!email || !name || !password) {
-            res.writeHead(400);
-            return res.end(JSON.stringify({ error: 'Missing fields' }));
+          const { email, password } = JSON.parse(body);
+          const emailMatches = String(email || '').trim().toLowerCase() === OWNER_EMAIL;
+          if (!emailMatches || !verifyPassword(String(password || ''), OWNER_PW_HASH)) {
+            res.writeHead(401);
+            return res.end(JSON.stringify({ error: 'Invalid credentials' }));
           }
-          if (Object.values(STATE.users).find(u => u.email === email)) {
-            res.writeHead(400);
-            return res.end(JSON.stringify({ error: 'Email already exists' }));
-          }
-          const newUser = {
-            id: crypto.randomBytes(16).toString('hex'),
-            email,
-            name,
-            pwHash: hashPassword(password),
-            createdAt: Date.now()
-          };
-          STATE.users[newUser.id] = newUser;
-          saveUsers();
-
-          const sid = createSession(newUser.id);
-          res.writeHead(201, { 'Set-Cookie': `sessionId=${sid}; Path=/; HttpOnly; Max-Age=604800` });
-          res.end(JSON.stringify({ ok: true, sessionId: sid, user: { id: newUser.id, email, name } }));
+          res.writeHead(200, { 'Set-Cookie': sessionCookie(req, createSession('owner')) });
+          res.end(JSON.stringify({ ok: true }));
         } catch(e) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: e.message }));
@@ -140,27 +141,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Login
-    if (pathname === '/api/auth/login' && req.method === 'POST') {
-      let body = '';
-      req.on('data', d => body += d);
-      req.on('end', () => {
-        try {
-          const { email, password } = JSON.parse(body);
-          const user = Object.values(STATE.users).find(u => u.email === email && verifyPassword(password, u.pwHash));
-          if (!user) {
-            res.writeHead(401);
-            return res.end(JSON.stringify({ error: 'Invalid credentials' }));
-          }
-          const sid = createSession(user.id);
-          res.writeHead(200, { 'Set-Cookie': `sessionId=${sid}; Path=/; HttpOnly; Max-Age=604800` });
-          res.end(JSON.stringify({ ok: true, sessionId: sid, user: { id: user.id, email: user.email, name: user.name } }));
-        } catch(e) {
-          res.writeHead(500);
-          res.end(JSON.stringify({ error: e.message }));
-        }
-      });
-      return;
+    if (pathname === '/api/auth/logout') {
+      res.writeHead(200, { 'Set-Cookie': 'sessionId=; Path=/; HttpOnly; Max-Age=0' });
+      return res.end(JSON.stringify({ ok: true }));
     }
 
     // Protected endpoints require session
@@ -270,39 +253,26 @@ function getLoginHTML() {
   <div class="auth-box">
     <h1>🚀 FORGE</h1>
 
-    <div class="tabs">
-      <div class="tab active" data-tab="login" onclick="showTab('login')">Login</div>
-      <div class="tab" data-tab="register" onclick="showTab('register')">Register</div>
-    </div>
-
     <div id="login" class="tab-content active">
-      <input type="email" id="login-email" placeholder="Email" />
-      <input type="password" id="login-password" placeholder="Password" />
-      <button onclick="handleLogin()">Login</button>
+      <input type="email" id="login-email" placeholder="Email" autocomplete="username" />
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+      <button id="login-button" onclick="handleLogin()">Login</button>
       <div id="login-error" class="error"></div>
-    </div>
-
-    <div id="register" class="tab-content">
-      <input type="email" id="register-email" placeholder="Email" />
-      <input type="text" id="register-name" placeholder="Name" />
-      <input type="password" id="register-password" placeholder="Password" />
-      <button onclick="handleRegister()">Register</button>
-      <div id="register-error" class="error"></div>
     </div>
   </div>
 
   <script>
-    function showTab(name) {
-      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-      document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-      document.getElementById(name).classList.add('active');
-      document.querySelector('[data-tab="' + name + '"]').classList.add('active');
-    }
+    const errorBox = document.getElementById('login-error');
+    const button = document.getElementById('login-button');
 
     async function handleLogin() {
       const email = document.getElementById('login-email').value.trim();
       const password = document.getElementById('login-password').value;
-      if (!email || !password) { document.getElementById('login-error').textContent = 'Please fill all fields'; return; }
+      if (!email || !password) { errorBox.textContent = 'Please fill all fields'; return; }
+
+      errorBox.textContent = '';
+      button.disabled = true;
+      button.textContent = 'Signing in...';
 
       try {
         const res = await fetch('/api/auth/login', {
@@ -310,57 +280,25 @@ function getLoginHTML() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         });
-        if (!res.ok) {
-          document.getElementById('login-error').textContent = 'Server error: ' + res.status;
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          location.href = '/';
           return;
         }
-        const data = await res.json();
-        if (data.ok) {
-          localStorage.setItem('sessionId', data.sessionId);
-          location.href = '/?sessionId=' + encodeURIComponent(data.sessionId);
-        } else {
-          document.getElementById('login-error').textContent = data.error || 'Login failed';
-        }
+        errorBox.textContent = res.status === 401
+          ? 'Incorrect email or password'
+          : (data.error || 'Login failed (' + res.status + ')');
       } catch(e) {
-        document.getElementById('login-error').textContent = 'Error: ' + e.message;
+        errorBox.textContent = 'Could not reach the server: ' + e.message;
       }
+
+      button.disabled = false;
+      button.textContent = 'Login';
     }
 
-    async function handleRegister() {
-      const email = document.getElementById('register-email').value.trim();
-      const name = document.getElementById('register-name').value.trim();
-      const password = document.getElementById('register-password').value;
-      if (!email || !name || !password) { document.getElementById('register-error').textContent = 'Please fill all fields'; return; }
-
-      try {
-        const res = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, name, password })
-        });
-        if (!res.ok) {
-          document.getElementById('register-error').textContent = 'Server error: ' + res.status;
-          return;
-        }
-        const data = await res.json();
-        if (data.ok) {
-          localStorage.setItem('sessionId', data.sessionId);
-          location.href = '/?sessionId=' + encodeURIComponent(data.sessionId);
-        } else {
-          document.getElementById('register-error').textContent = data.error || 'Registration failed';
-        }
-      } catch(e) {
-        document.getElementById('register-error').textContent = 'Error: ' + e.message;
-      }
-    }
-
-    // Check if logged in
-    const urlParams = new URLSearchParams(window.location.search);
-    const urlSessionId = urlParams.get('sessionId');
-    if (urlSessionId) localStorage.setItem('sessionId', urlSessionId);
-
-    const sessionId = localStorage.getItem('sessionId');
-    if (sessionId && !urlSessionId) location.href = '/';
+    document.querySelectorAll('#login input').forEach(el => {
+      el.addEventListener('keydown', e => { if (e.key === 'Enter') handleLogin(); });
+    });
   </script>
 </body>
 </html>`;
@@ -450,9 +388,6 @@ function getDashboardHTML() {
   </div>
 
   <script>
-    const sessionId = localStorage.getItem('sessionId');
-    if (!sessionId) location.href = '/';
-
     function showSection(name) {
       document.querySelectorAll('.section').forEach(el => el.style.display = 'none');
       document.getElementById(name).style.display = 'block';
@@ -460,8 +395,8 @@ function getDashboardHTML() {
       event.target.classList.add('active');
     }
 
-    function logout() {
-      localStorage.removeItem('sessionId');
+    async function logout() {
+      await fetch('/api/auth/logout').catch(() => {});
       location.href = '/';
     }
 
@@ -514,7 +449,6 @@ function getDashboardHTML() {
 </html>`;
 }
 
-loadState();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 FORGE Dashboard running on http://localhost:${PORT}\n`);

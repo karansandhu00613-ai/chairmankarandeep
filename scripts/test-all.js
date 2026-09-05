@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const tests = [];
 let passed = 0;
@@ -42,11 +43,31 @@ test('Required files exist', () => {
   });
 });
 
+// Every other test in this file only greps source text, which cannot catch a file
+// that Node refuses to parse. Two shipped syntax errors passed the whole suite
+// before this check existed.
+test('All service files parse', () => {
+  const services = [
+    'karan-dashboard.js',
+    'karan-chief-operator.js',
+    'chairman-enhanced.js',
+    'jarvis.js'
+  ];
+  services.forEach(f => {
+    const result = spawnSync(process.execPath, ['--check', path.join('/home/user/-chairmankarandeep', f)]);
+    if (result.status !== 0) {
+      throw new Error(`${f}: ${result.stderr.toString().split('\n').slice(0, 3).join(' ').trim()}`);
+    }
+  });
+});
+
 // Test 2: Check Dashboard authentication code
 test('Dashboard has login endpoint', () => {
   const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
   if (!code.includes('/api/auth/login')) throw new Error('No login endpoint found');
-  if (!code.includes('/api/auth/register')) throw new Error('No register endpoint found');
+  if (code.includes('/api/auth/register')) {
+    throw new Error('Register endpoint present; dashboard is single-owner only');
+  }
 });
 
 // Test 3: Check password hashing is implemented
@@ -54,6 +75,27 @@ test('Password hashing configured (PBKDF2)', () => {
   const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
   if (!code.includes('pbkdf2Sync')) throw new Error('No PBKDF2 hashing found');
   if (!code.includes('100000')) throw new Error('Not using 100k iterations');
+  if (/pbkdf2Sync\([^,]+,\s*['"]/.test(code)) throw new Error('Hardcoded password salt');
+});
+
+// Credentials must not be readable from the repo.
+test('No credentials committed in source', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  ['OWNER_EMAIL', 'OWNER_PASSWORD', 'SESSION_SECRET'].forEach(name => {
+    if (!code.includes(`process.env.${name}`)) throw new Error(`${name} not read from environment`);
+    if (new RegExp(`${name}\\s*=\\s*['"][^'"]+['"]`).test(code)) {
+      throw new Error(`${name} has a hardcoded value`);
+    }
+  });
+});
+
+// The stale-token redirect loop that made the deployed page spin forever.
+test('Login page has no self-redirect loop', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  if (code.includes("localStorage.getItem('sessionId')")) {
+    throw new Error('Login page still trusts localStorage for auth state');
+  }
+  if (code.includes("'/?sessionId='")) throw new Error('Session token passed via URL');
 });
 
 // Test 4: Check session management
