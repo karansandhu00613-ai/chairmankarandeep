@@ -35,6 +35,72 @@ services:
     labels:
       - "com.example.description=Chairman Agent OS"
 
+  # Karan Chief Operator - Personal AI Assistant
+  karan:
+    build:
+      context: .
+      dockerfile: Dockerfile-Karan
+    container_name: karan-chief-operator
+    ports:
+      - "9000:9000"
+    environment:
+      NODE_ENV: development
+      PORT: 9000
+      PRODUCTION: 0
+      STORE: local
+      CHAIRMAN_API: http://chairman:8080
+      JARVIS_API: http://jarvis:8001
+      # Enable these for cloud deployment:
+      # STORE: github
+      # GH_TOKEN: ${GH_TOKEN}
+      # GH_REPO: ${GH_REPO}
+      # BOOTSTRAP_SECRET: ${BOOTSTRAP_SECRET}
+      # SLACK_WEBHOOK: ${SLACK_WEBHOOK}
+      # DISCORD_WEBHOOK: ${DISCORD_WEBHOOK}
+    volumes:
+      - ./karan-data.json:/app/karan-data.json
+      - ./karan-sessions.json:/app/karan-sessions.json
+      - ./karan-chief-operator.js:/app/karan-chief-operator.js:ro
+    restart: unless-stopped
+    depends_on:
+      - chairman
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9000/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - chairman-net
+    labels:
+      - "com.example.description=Karan Chief Operator"
+
+  # Jarvis - Voice AI Assistant
+  jarvis:
+    image: node:18-alpine
+    container_name: jarvis-voice-assistant
+    ports:
+      - "8001:8001"
+    working_dir: /app
+    volumes:
+      - ./jarvis.js:/app/jarvis.js:ro
+    command: node jarvis.js
+    environment:
+      NODE_ENV: development
+      PORT: 8001
+      KARAN_API: http://karan:9000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8001/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - chairman-net
+    labels:
+      - "com.example.description=Jarvis Voice Assistant"
+
   # Optional: PostgreSQL for future database support
   postgres:
     image: postgres:15-alpine
