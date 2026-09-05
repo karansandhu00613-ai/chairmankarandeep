@@ -9,3 +9,8 @@ data.json
 sessions.json
 dashboard-users.json
 dashboard-sessions.json
+# Chairman OS runtime state. OWNER_CREDENTIALS.txt holds a plaintext bootstrap
+# password and owner.json holds the credential hash; neither belongs in a repo.
+OWNER_CREDENTIALS.txt
+owner.json
+chairman-data/

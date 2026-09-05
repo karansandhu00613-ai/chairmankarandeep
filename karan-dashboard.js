@@ -243,7 +243,10 @@ function proxyRequest(baseUrl, path, method, body) {
       path: url.pathname + url.search,
       method,
       headers,
-      timeout: 15000
+      // A free-tier backend that has idled takes up to a minute to wake. At the
+      // old 15s the first message after any quiet period always failed, which
+      // is why the chat looked broken.
+      timeout: 75000
     }, res => {
       let data = '';
       res.on('data', d => data += d);
@@ -500,7 +503,7 @@ ${baseStyles()}
     <div class="nav">
       <div class="nav-item active" data-sec="overview"><span class="ico">◈</span><span>Overview</span></div>
       <div class="nav-item" data-sec="chat"><span class="ico">✦</span><span>Chat</span></div>
-      <div class="nav-item" data-sec="monitor"><span class="ico">▤</span><span>Monitor</span></div>
+      <div class="nav-item" data-sec="monitor"><span class="ico">▤</span><span>Chairman OS</span></div>
       <div class="nav-item" data-sec="voice"><span class="ico">◉</span><span>Voice</span></div>
     </div>
   </aside>
@@ -536,12 +539,14 @@ ${baseStyles()}
 
     <section id="monitor" class="section">
       <div class="panel glass">
-        <h3>Monitor</h3>
-        <p class="hint">Live payload from the Chairman service.</p>
+        <h3>Chairman Agent OS</h3>
+        <p class="hint">The full system: business factory, domain desk, growth engine,
+        missions, skills and agents. It has its own interface and its own login.</p>
         <div class="row" style="margin-bottom:14px">
-          <button onclick="loadFeed('monitor-out','/api/chairman/api/dashboard')">Refresh</button>
+          <button onclick="openChairman()">Open Chairman OS</button>
+          <button class="ghost" onclick="loadFeed('monitor-out','/api/chairman/api/health')">Check it is awake</button>
         </div>
-        <div class="log" id="monitor-out">Press refresh to load.</div>
+        <div class="log" id="monitor-out">Opens in a new tab. If it has been idle it takes up to a minute to wake.</div>
       </div>
     </section>
 
@@ -559,7 +564,8 @@ ${baseStyles()}
 </div>
 
 <script>
-  var TITLES = { overview: 'Overview', chat: 'Chat', monitor: 'Monitor', voice: 'Voice' };
+  var TITLES = { overview: 'Overview', chat: 'Chat', monitor: 'Chairman OS', voice: 'Voice' };
+  var CHAIRMAN_URL = '${CHAIRMAN_API}';
 
   document.querySelectorAll('.nav-item').forEach(function (item) {
     item.addEventListener('click', function () {
@@ -611,6 +617,7 @@ ${baseStyles()}
     el.textContent = text;
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
+    return el;
   }
 
   async function sendMessage() {
@@ -623,6 +630,18 @@ ${baseStyles()}
     input.value = '';
     send.disabled = true;
 
+    // Waking a sleeping backend takes up to a minute, so say so rather than
+    // leaving a dead-looking box.
+    var waiting = addMsg('Thinking...', 'them');
+    var waitedFor = 0;
+    var ticker = setInterval(function () {
+      waitedFor += 1;
+      if (waitedFor === 4) waiting.textContent = 'Waking the Karan service, this can take up to a minute...';
+      else if (waitedFor > 4) waiting.textContent = 'Still waking... ' + waitedFor + 's';
+    }, 1000);
+
+    var settle = function () { clearInterval(ticker); waiting.remove(); };
+
     try {
       var res = await fetch('/api/karan/api/chat', {
         method: 'POST',
@@ -630,6 +649,7 @@ ${baseStyles()}
         body: JSON.stringify({ message: text })
       });
       var data = await res.json().catch(function () { return {}; });
+      settle();
       if (!res.ok) {
         addMsg('Karan service returned ' + res.status + (data.error ? ': ' + data.error : ''), 'sys');
       } else {
@@ -639,6 +659,7 @@ ${baseStyles()}
         addMsg(reply, 'them');
       }
     } catch (e) {
+      settle();
       addMsg('Could not reach the Karan service: ' + e.message, 'sys');
     }
     send.disabled = false;
@@ -661,6 +682,10 @@ ${baseStyles()}
     } catch (e) {
       out.textContent = 'Request failed: ' + e.message;
     }
+  }
+
+  function openChairman() {
+    window.open(CHAIRMAN_URL, '_blank', 'noopener');
   }
 
   async function logout() {

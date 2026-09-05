@@ -31,6 +31,7 @@ test('Required files exist', () => {
     'karan-dashboard.js',
     'karan-chief-operator.js',
     'chairman-enhanced.js',
+    'chairman.js',
     'jarvis.js',
     'Dockerfile.karan',
     'Dockerfile.chairman',
@@ -51,6 +52,7 @@ test('All service files parse', () => {
     'karan-dashboard.js',
     'karan-chief-operator.js',
     'chairman-enhanced.js',
+    'chairman.js',
     'jarvis.js'
   ];
   services.forEach(f => {
