@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Karan Dashboard - Self-Contained AI Operating System</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fff; color: #333; line-height: 1.6; }
+
+    .navbar { display: flex; justify-content: space-between; align-items: center; padding: 20px 60px; border-bottom: 1px solid #e5e5e5; }
+    .navbar h1 { font-size: 24px; font-weight: 700; color: #000; }
+    .navbar a { color: #0066cc; text-decoration: none; margin-left: 20px; font-size: 14px; }
+
+    .hero { padding: 80px 60px; text-align: center; background: linear-gradient(135deg, #f5f5f5 0%, #fafafa 100%); }
+    .hero h2 { font-size: 48px; font-weight: 700; margin-bottom: 20px; color: #000; }
+    .hero p { font-size: 20px; color: #666; margin-bottom: 30px; max-width: 600px; margin-left: auto; margin-right: auto; }
+    .cta-buttons { display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }
+    .btn { padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 16px; cursor: pointer; border: none; transition: 0.2s; }
+    .btn-primary { background: #10a37f; color: white; }
+    .btn-primary:hover { background: #1a8f6f; }
+    .btn-secondary { background: #f0f0f0; color: #000; }
+    .btn-secondary:hover { background: #e5e5e5; }
+
+    .features { padding: 80px 60px; background: white; }
+    .features h2 { font-size: 36px; font-weight: 700; text-align: center; margin-bottom: 50px; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 30px; }
+    .feature { padding: 30px; background: #f9f9f9; border-radius: 8px; border-left: 4px solid #10a37f; }
+    .feature h3 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+    .feature p { font-size: 14px; color: #666; }
+
+    .pricing { padding: 80px 60px; background: #f5f5f5; }
+    .pricing h2 { font-size: 36px; font-weight: 700; text-align: center; margin-bottom: 50px; }
+    .pricing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 30px; }
+    .pricing-card { background: white; padding: 40px 30px; border-radius: 8px; border: 1px solid #e5e5e5; text-align: center; }
+    .pricing-card h3 { font-size: 20px; font-weight: 600; margin-bottom: 10px; }
+    .price { font-size: 42px; font-weight: 700; color: #10a37f; margin: 20px 0; }
+    .price-period { font-size: 14px; color: #999; }
+    .pricing-card ul { text-align: left; margin: 30px 0; list-style: none; }
+    .pricing-card li { padding: 10px 0; font-size: 14px; }
+    .pricing-card li:before { content: "✓ "; color: #10a37f; font-weight: bold; margin-right: 8px; }
+
+    .stats { padding: 80px 60px; background: white; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 40px; text-align: center; }
+    .stat h3 { font-size: 32px; font-weight: 700; color: #10a37f; }
+    .stat p { font-size: 16px; color: #666; margin-top: 10px; }
+
+    .faq { padding: 80px 60px; background: #f5f5f5; }
+    .faq h2 { font-size: 36px; font-weight: 700; text-align: center; margin-bottom: 50px; }
+    .faq-item { background: white; padding: 20px; margin-bottom: 15px; border-radius: 6px; cursor: pointer; }
+    .faq-item h4 { font-size: 16px; font-weight: 600; margin-bottom: 0; }
+    .faq-item p { display: none; font-size: 14px; color: #666; margin-top: 10px; }
+    .faq-item.open p { display: block; }
+
+    .footer { padding: 40px 60px; background: #000; color: white; text-align: center; font-size: 14px; }
+    .footer a { color: #10a37f; text-decoration: none; }
+
+    @media (max-width: 768px) {
+      .navbar, .hero, .features, .pricing, .faq, .footer { padding: 40px 20px; }
+      .hero h2 { font-size: 32px; }
+      .hero p { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="navbar">
+    <h1>⚡ Karan</h1>
+    <div>
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/karansandhu00613-ai/-chairmankarandeep" target="_blank">GitHub</a>
+    </div>
+  </div>
+
+  <div class="hero">
+    <h2>Your AI Operating System</h2>
+    <p>Self-contained, multi-user dashboard. Chat, monitor, automate, and orchestrate everything from one place. No external AI dependencies.</p>
+    <div class="cta-buttons">
+      <a href="#" class="btn btn-primary">Get Started Free</a>
+      <a href="https://github.com/karansandhu00613-ai/-chairmankarandeep" class="btn btn-secondary">View on GitHub</a>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <h3>4</h3>
+      <p>Integrated Services</p>
+    </div>
+    <div class="stat">
+      <h3>100%</h3>
+      <p>Self-Contained</p>
+    </div>
+    <div class="stat">
+      <h3>5 min</h3>
+      <p>Deploy to Cloud</p>
+    </div>
+    <div class="stat">
+      <h3>0</h3>
+      <p>External Dependencies</p>
+    </div>
+  </div>
+
+  <div class="features" id="features">
+    <h2>Everything You Need</h2>
+    <div class="feature-grid">
+      <div class="feature">
+        <h3>💬 Chat Interface</h3>
+        <p>Natural language chat with Karan. Manage tasks, ask questions, get status updates — all in one conversation.</p>
+      </div>
+      <div class="feature">
+        <h3>📊 Monitoring</h3>
+        <p>Real-time dashboards with Chairman. Watch systems, track metrics, get alerts before problems happen.</p>
+      </div>
+      <div class="feature">
+        <h3>✓ Task Management</h3>
+        <p>Create, track, and complete tasks. Organize projects. Prioritize work. Stay on top of everything.</p>
+      </div>
+      <div class="feature">
+        <h3>🎤 Voice Commands</h3>
+        <p>Use Jarvis for hands-free control. "Create a task", "Check status", "Send alert" — voice-activated automation.</p>
+      </div>
+      <div class="feature">
+        <h3>🔐 Multi-User</h3>
+        <p>Team collaboration with secure authentication. API keys for integrations. Role-based access control.</p>
+      </div>
+      <div class="feature">
+        <h3>🌐 Deploy Anywhere</h3>
+        <p>Local Docker, Render, Railway, AWS, or on-premise. Choose your infrastructure. Keep your data.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="pricing" id="pricing">
+    <h2>Simple Pricing</h2>
+    <div class="pricing-grid">
+      <div class="pricing-card">
+        <h3>Starter</h3>
+        <div class="price">$0<span class="price-period">/month</span></div>
+        <p>Self-hosted, forever free</p>
+        <ul>
+          <li>Unlimited users (self-hosted)</li>
+          <li>All core features</li>
+          <li>Docker deployment</li>
+          <li>Community support</li>
+        </ul>
+        <a href="#" class="btn btn-secondary" style="width: 100%;">Deploy Now</a>
+      </div>
+      <div class="pricing-card">
+        <h3>Pro</h3>
+        <div class="price">$29<span class="price-period">/month</span></div>
+        <p>Cloud hosted, managed</p>
+        <ul>
+          <li>Cloud deployment</li>
+          <li>Automatic backups</li>
+          <li>Priority support</li>
+          <li>Unlimited API calls</li>
+        </ul>
+        <a href="#" class="btn btn-primary" style="width: 100%;">Coming Soon</a>
+      </div>
+      <div class="pricing-card">
+        <h3>Enterprise</h3>
+        <div class="price">Custom<span class="price-period">/month</span></div>
+        <p>Full control, dedicated support</p>
+        <ul>
+          <li>On-premise deployment</li>
+          <li>Custom integrations</li>
+          <li>SLA guarantee</li>
+          <li>Dedicated account manager</li>
+        </ul>
+        <a href="mailto:hello@karandashboard.com" class="btn btn-secondary" style="width: 100%;">Contact Sales</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="faq" id="faq">
+    <h2>Common Questions</h2>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>Do I need external APIs?</h4>
+      <p>No. Karan is completely self-contained. It doesn't rely on ChatGPT, Claude, or any external AI. All services run on your infrastructure.</p>
+    </div>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>Can I run this locally?</h4>
+      <p>Yes! Just run <code>docker-compose up</code> and access at http://localhost:8000. Perfect for development and testing.</p>
+    </div>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>How much does it cost?</h4>
+      <p>Self-hosted is free forever. Cloud hosting is $29/month (Pro plan). No hidden fees. No per-user charges.</p>
+    </div>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>Is my data secure?</h4>
+      <p>Yes. Data is stored on your infrastructure or private GitHub repo. No third-party access. Full encryption support. PBKDF2 password hashing.</p>
+    </div>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>Can I customize it?</h4>
+      <p>Absolutely. Full source code included. Modify anything. Add features. Deploy on your servers. Complete control.</p>
+    </div>
+    <div class="faq-item" onclick="this.classList.toggle('open')">
+      <h4>How do I integrate with Slack/Discord?</h4>
+      <p>Add webhook URLs to environment variables. Karan automatically sends alerts and notifications to your channels.</p>
+    </div>
+  </div>
+
+  <div class="footer">
+    <p>&copy; 2024 Karan Dashboard. <a href="#">Status</a> • <a href="#">Docs</a> • <a href="#">GitHub</a> • <a href="#">Contact</a></p>
+  </div>
+</body>
+</html>
