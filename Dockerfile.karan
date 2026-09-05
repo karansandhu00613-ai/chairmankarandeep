@@ -1,0 +1,27 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm install --production || npm install || true
+
+# Copy Karan service
+COPY karan-chief-operator.js .
+
+# Expose port
+EXPOSE 9000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:9000/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+
+# Environment
+ENV NODE_ENV=production \
+    PORT=9000 \
+    PRODUCTION=1
+
+# Run Karan
+CMD ["node", "karan-chief-operator.js"]
