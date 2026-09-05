@@ -317,7 +317,7 @@ function getLoginHTML() {
         const data = await res.json();
         if (data.ok) {
           localStorage.setItem('sessionId', data.sessionId);
-          location.href = '/';
+          location.href = '/?sessionId=' + encodeURIComponent(data.sessionId);
         } else {
           document.getElementById('login-error').textContent = data.error || 'Login failed';
         }
@@ -345,7 +345,7 @@ function getLoginHTML() {
         const data = await res.json();
         if (data.ok) {
           localStorage.setItem('sessionId', data.sessionId);
-          location.href = '/';
+          location.href = '/?sessionId=' + encodeURIComponent(data.sessionId);
         } else {
           document.getElementById('register-error').textContent = data.error || 'Registration failed';
         }
@@ -355,8 +355,12 @@ function getLoginHTML() {
     }
 
     // Check if logged in
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlSessionId = urlParams.get('sessionId');
+    if (urlSessionId) localStorage.setItem('sessionId', urlSessionId);
+
     const sessionId = localStorage.getItem('sessionId');
-    if (sessionId) location.href = '/';
+    if (sessionId && !urlSessionId) location.href = '/';
   </script>
 </body>
 </html>`;
