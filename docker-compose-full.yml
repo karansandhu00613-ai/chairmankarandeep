@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # Chairman Agent OS - Monitoring & Automation
+  chairman:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chairman-agent-os
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: development
+      PORT: 8080
+      PRODUCTION: 0
+      STORE: local
+    volumes:
+      - ./data.json:/app/data.json
+      - ./sessions.json:/app/sessions.json
+      - ./chairman-enhanced.js:/app/chairman-enhanced.js:ro
+    restart: unless-stopped
+    networks:
+      - karan-net
+    labels:
+      - "com.example.description=Chairman Agent OS"
+
+  # Karan Chief Operator - Personal AI Assistant
+  karan:
+    build:
+      context: .
+      dockerfile: Dockerfile-Karan
+    container_name: karan-chief-operator
+    ports:
+      - "9000:9000"
+    environment:
+      NODE_ENV: development
+      PORT: 9000
+      PRODUCTION: 0
+      STORE: local
+      CHAIRMAN_API: http://chairman:8080
+      JARVIS_API: http://jarvis:8001
+    volumes:
+      - ./karan-data.json:/app/karan-data.json
+      - ./karan-sessions.json:/app/karan-sessions.json
+      - ./karan-chief-operator.js:/app/karan-chief-operator.js:ro
+    restart: unless-stopped
+    depends_on:
+      - chairman
+    networks:
+      - karan-net
+    labels:
+      - "com.example.description=Karan Chief Operator"
+
+  # Jarvis - Voice AI Assistant
+  jarvis:
+    image: node:18-alpine
+    container_name: jarvis-voice-assistant
+    ports:
+      - "8001:8001"
+    working_dir: /app
+    volumes:
+      - ./jarvis.js:/app/jarvis.js:ro
+    command: node jarvis.js
+    environment:
+      NODE_ENV: development
+      PORT: 8001
+      KARAN_API: http://karan:9000
+    restart: unless-stopped
+    networks:
+      - karan-net
+    labels:
+      - "com.example.description=Jarvis Voice Assistant"
+
+  # PostgreSQL Database (Optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: karan-db
+    environment:
+      POSTGRES_DB: karan
+      POSTGRES_USER: karan
+      POSTGRES_PASSWORD: karan123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - karan-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U karan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - with-db
+
+volumes:
+  postgres_data:
+
+networks:
+  karan-net:
+    driver: bridge
