@@ -117,10 +117,11 @@ async function sendToKaran(sessionId, response) {
       data: response
     });
 
+    const karanUrl = new URL(`${KARAN_API}/api/voice?sessionId=${sessionId}`);
     const req = http.request({
-      hostname: 'localhost',
-      port: 9000,
-      path: `/api/voice?sessionId=${sessionId}`,
+      hostname: karanUrl.hostname,
+      port: karanUrl.port || 80,
+      path: karanUrl.pathname + karanUrl.search,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

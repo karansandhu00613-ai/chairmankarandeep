@@ -110,6 +110,11 @@ function localStore(dir) {
   };
 }
 
+// Call webhooks on important events
+async function notifyWebhooks(type, data) {
+  await sendWebhook(type, data);
+}
+
 function githubStore() {
   const token = process.env.GH_TOKEN;
   const repo = process.env.GH_REPO;
@@ -137,9 +142,13 @@ function githubStore() {
     async write(name, text) {
       const [owner, repoName] = repo.split('/');
       try {
-        const existing = await this.read(name);
-        const sha = existing ? JSON.parse(
-          Buffer.from((await ghAPI('GET', `/repos/${owner}/${repoName}/contents/${name}?ref=${branch}`, token)).content, 'base64').toString()).sha : null;
+        let sha = null;
+        try {
+          const fileRes = await ghAPI('GET', `/repos/${owner}/${repoName}/contents/${name}?ref=${branch}`, token);
+          sha = fileRes.sha;
+        } catch (e) {
+          // File doesn't exist yet, that's ok
+        }
         await ghAPI('PUT', `/repos/${owner}/${repoName}/contents/${name}`, token, {
           message: `Update ${name}`,
           content: Buffer.from(text).toString('base64'),
@@ -169,7 +178,7 @@ async function ghAPI(method, path, token, body) {
       let buf = '';
       res.on('data', d => buf += d);
       res.on('end', () => {
-        if (res.statusCode >= 400) return reject(new Error(`GitHub API ${res.statusCode}`));
+        if (res.statusCode >= 400) return reject(new Error(`GitHub API ${res.statusCode}: ${buf.slice(0, 100)}`));
         try { resolve(JSON.parse(buf)); } catch(e) { resolve(buf); }
       });
     });
@@ -177,6 +186,33 @@ async function ghAPI(method, path, token, body) {
     if (data) req.write(data);
     req.end();
   });
+}
+
+async function sendWebhook(type, data) {
+  if (SLACK_WEBHOOK) {
+    const payload = {
+      text: `${type}: ${JSON.stringify(data).slice(0, 100)}`,
+      ts: Math.floor(Date.now() / 1000)
+    };
+    try {
+      const u = new URL(SLACK_WEBHOOK);
+      https.request(u, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+        res.on('data', () => {});
+      }).end(JSON.stringify(payload));
+    } catch (e) {}
+  }
+
+  if (DISCORD_WEBHOOK) {
+    const payload = {
+      content: `**${type}**: ${JSON.stringify(data).slice(0, 100)}`
+    };
+    try {
+      const u = new URL(DISCORD_WEBHOOK);
+      https.request(u, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+        res.on('data', () => {});
+      }).end(JSON.stringify(payload));
+    } catch (e) {}
+  }
 }
 
 // ============================================================================
@@ -296,7 +332,7 @@ async function handleTaskIntent(intent, userId) {
   const action = intent.action;
 
   if (action === 'create') {
-    return { text: 'I can help you create a task. What would you like to track?', type: 'prompt' };
+    return { text: 'I can help you create a task. What would you like to track?', type: 'prompt', action: 'await_task_title' };
   }
 
   if (action === 'list') {
@@ -337,16 +373,31 @@ async function handleProjectIntent(intent, userId) {
 }
 
 async function handleMonitorIntent(intent, userId) {
-  if (!S.chairman.enabled) {
+  if (!S.chairman.enabled || !CHAIRMAN_API) {
     return { text: 'Chairman monitoring is not configured. Would you like to set it up?', type: 'assistant' };
   }
 
-  return {
-    text: 'Checking your monitors now...',
-    type: 'assistant',
-    action: 'fetch_monitors',
-    data: { endpoint: '/api/monitors' }
-  };
+  try {
+    const res = await new Promise((resolve, reject) => {
+      https.get(`${CHAIRMAN_API}/api/monitors`, (r) => {
+        let data = '';
+        r.on('data', d => data += d);
+        r.on('end', () => resolve(JSON.parse(data)));
+      }).on('error', reject);
+    });
+
+    const monitors = res.monitors || [];
+    const up = monitors.filter(m => m.status === 'up').length;
+    const down = monitors.filter(m => m.status === 'down').length;
+
+    return {
+      text: `Chairman status: ${up} up, ${down} down (${monitors.length} total)`,
+      type: 'assistant',
+      data: { monitors, summary: { up, down, total: monitors.length } }
+    };
+  } catch (e) {
+    return { text: `Error fetching monitors: ${e.message}`, type: 'error' };
+  }
 }
 
 async function handleJarvisIntent(intent, text, userId) {
@@ -362,7 +413,15 @@ async function handleJarvisIntent(intent, text, userId) {
 }
 
 async function handleScheduleIntent(intent, userId) {
-  return { text: 'What would you like me to schedule or remind you about?', type: 'prompt' };
+  const automation = {
+    id: uid(),
+    userId,
+    type: 'reminder',
+    status: 'pending',
+    createdAt: Date.now()
+  };
+  S.automations[automation.id] = automation;
+  return { text: 'What should I remind you about? (Include day/time if needed)', type: 'prompt', automationId: automation.id };
 }
 
 async function handleQueryIntent(intent, userId) {
@@ -435,6 +494,16 @@ function createProject(userId, name, description = '') {
 // ============================================================================
 
 function upgradeToWebSocket(req, socket, head) {
+  const url_obj = new URL(req.url, 'http://x');
+  const sessionId = url_obj.searchParams.get('sessionId');
+  const sess = verifySession(sessionId);
+
+  if (!sess) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
   const key = req.headers['sec-websocket-key'];
   const hash = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
 
@@ -449,7 +518,7 @@ function upgradeToWebSocket(req, socket, head) {
 
   socket.write(response);
 
-  const ws = { socket, isAlive: true, sessionId: null };
+  const ws = { socket, isAlive: true, sessionId, userId: sess.uid };
   WS_CLIENTS.set(socket, ws);
 
   socket.on('error', (err) => console.error('WebSocket error:', err.message));
@@ -472,17 +541,24 @@ function broadcastEvent(channel, data) {
 
 function createWebSocketFrame(data) {
   const payload = Buffer.from(data);
-  const frame = Buffer.alloc(payload.length + 14);
-  frame[0] = 0x81;
-  frame[1] = payload.length < 126 ? payload.length : (payload.length < 65536 ? 126 : 127);
-  let offset = 2;
+  let headerSize = 2;
+  if (payload.length >= 126) headerSize += (payload.length < 65536) ? 2 : 8;
 
-  if (payload.length >= 65536) {
-    frame.writeBigUInt64BE(BigInt(payload.length), offset);
-    offset += 8;
-  } else if (payload.length >= 126) {
-    frame.writeUInt16BE(payload.length, offset);
-    offset += 2;
+  const frame = Buffer.alloc(headerSize + payload.length);
+  frame[0] = 0x81;
+  let offset = 1;
+
+  if (payload.length < 126) {
+    frame[offset] = payload.length;
+    offset = 2;
+  } else if (payload.length < 65536) {
+    frame[offset] = 126;
+    frame.writeUInt16BE(payload.length, offset + 1);
+    offset = 4;
+  } else {
+    frame[offset] = 127;
+    frame.writeBigUInt64BE(BigInt(payload.length), offset + 1);
+    offset = 10;
   }
 
   payload.copy(frame, offset);
@@ -494,13 +570,28 @@ function createWebSocketFrame(data) {
 // ============================================================================
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
-function hash(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
+function hashPassword(password) {
+  const salt = crypto.randomBytes(32).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
+  return `${salt}:${hash}`;
+}
+function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  const computed = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
+  return computed === hash;
+}
 
-function createSession(uid) {
+function createSession(userId) {
   const sid = uid();
-  const session = { uid, sid, t: Date.now() };
+  const session = { uid: userId, sid, t: Date.now() };
   SESS.set(sid, session);
   return sid;
+}
+
+async function persistSessions() {
+  const sessions = {};
+  for (const [k, v] of SESS) sessions[k] = v;
+  await STORE.write(SESSDB, JSON.stringify(sessions, null, 1));
 }
 
 function verifySession(sessionId) {
@@ -529,7 +620,7 @@ async function handleAPI(req, res, pathname, query) {
     const body = await readBody(req);
     const { id, password } = JSON.parse(body);
 
-    if (id === S.owner.id && hash(password) === S.owner.pwHash) {
+    if (id === S.owner.id && verifyPassword(password, S.owner.pwHash)) {
       const sessionId = createSession(S.owner.id);
       return send(res, 200, { ok: true, sessionId });
     }
@@ -540,16 +631,21 @@ async function handleAPI(req, res, pathname, query) {
   if (pathname === '/api/auth/register' && method === 'POST') {
     if (S.owner.id) return send(res, 400, { error: 'Owner already registered' });
 
+    // Require BOOTSTRAP_SECRET to prevent first-caller hijacking
+    const bootstrap = process.env.BOOTSTRAP_SECRET;
     const body = await readBody(req);
-    const { id, password, name } = JSON.parse(body);
+    const { id, password, name, secret } = JSON.parse(body);
 
-    S.owner = { id, pwHash: hash(password), name, email: '', createdAt: Date.now() };
+    if (bootstrap && secret !== bootstrap) return send(res, 403, { error: 'Invalid bootstrap secret' });
+
+    S.owner = { id, pwHash: hashPassword(password), name, email: '', createdAt: Date.now() };
     const sessionId = createSession(S.owner.id);
 
     await STORE.write(DB, JSON.stringify(S, null, 1));
+    await persistSessions();
 
-    send(res, 201, { ok: true, sessionId });
     broadcastEvent('auth', { type: 'registered', owner: name });
+    return send(res, 201, { ok: true, sessionId });
   }
 
   // Protected endpoints
@@ -751,6 +847,20 @@ function getIndexHTML() {
     .sidebar-item.active { background: #00d4ff; color: #000; font-weight: bold; }
 
     .main { flex: 1; display: flex; flex-direction: column; }
+
+    .auth-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z: 1000; }
+    .auth-modal.hidden { display: none; }
+    .auth-box { background: #16213e; border: 1px solid #00d4ff; padding: 40px; border-radius: 12px; width: 90%; max-width: 400px; }
+    .auth-box h2 { color: #00d4ff; margin-bottom: 30px; text-align: center; font-size: 24px; }
+    .auth-box label { display: block; color: #e0e0e0; margin-bottom: 8px; font-size: 14px; }
+    .auth-box input { width: 100%; padding: 12px; background: #1a2e4a; border: 1px solid #444; color: #e0e0e0; margin-bottom: 16px; border-radius: 6px; font-size: 14px; }
+    .auth-box input:focus { outline: none; border-color: #00d4ff; }
+    .auth-box button { width: 100%; padding: 12px; background: #00d4ff; color: #000; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-bottom: 10px; transition: 0.2s; font-size: 14px; }
+    .auth-box button:hover { background: #00ff88; }
+    .auth-box .secondary { background: #1a2e4a; color: #00d4ff; border: 1px solid #00d4ff; }
+    .auth-box .secondary:hover { background: #253d57; }
+    .auth-toggle { text-align: center; margin-top: 16px; font-size: 14px; }
+    .auth-toggle a { color: #00d4ff; cursor: pointer; text-decoration: underline; }
     .header { background: #16213e; border-bottom: 1px solid #444; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
     .header h1 { color: #00d4ff; font-size: 24px; }
     .header-info { display: flex; gap: 20px; align-items: center; }
@@ -792,6 +902,37 @@ function getIndexHTML() {
   </style>
 </head>
 <body>
+  <!-- Auth Modal -->
+  <div id="auth-modal" class="auth-modal">
+    <div class="auth-box">
+      <h2 id="auth-title">Login to Karan</h2>
+      <div id="login-form">
+        <label>Username</label>
+        <input type="text" id="login-id" placeholder="your username">
+        <label>Password</label>
+        <input type="password" id="login-password" placeholder="your password">
+        <button onclick="handleLogin()">Login</button>
+        <div class="auth-toggle">
+          Don't have an account? <a onclick="switchToRegister()">Register</a>
+        </div>
+      </div>
+      <div id="register-form" style="display:none;">
+        <label>Username</label>
+        <input type="text" id="register-id" placeholder="choose a username">
+        <label>Name</label>
+        <input type="text" id="register-name" placeholder="your name">
+        <label>Password</label>
+        <input type="password" id="register-password" placeholder="strong password">
+        <label>Bootstrap Secret (if required)</label>
+        <input type="password" id="register-secret" placeholder="leave empty if not required">
+        <button onclick="handleRegister()">Register</button>
+        <div class="auth-toggle">
+          Already have an account? <a onclick="switchToLogin()">Login</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="container">
     <!-- Sidebar -->
     <div class="sidebar">
@@ -869,12 +1010,85 @@ function getIndexHTML() {
   <script>
     let sessionId = localStorage.getItem('sessionId');
     const messagesDiv = document.getElementById('messages');
+    const authModal = document.getElementById('auth-modal');
 
     async function api(path, method = 'GET', data = null) {
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
       if (data) opts.body = JSON.stringify(data);
       const res = await fetch(\`/api\${path}?sessionId=\${sessionId}\`, opts);
       return res.json();
+    }
+
+    function showAuthModal() {
+      authModal.classList.remove('hidden');
+      document.querySelector('.container').style.display = 'none';
+    }
+
+    function hideAuthModal() {
+      authModal.classList.add('hidden');
+      document.querySelector('.container').style.display = 'flex';
+    }
+
+    function switchToLogin() {
+      document.getElementById('login-form').style.display = 'block';
+      document.getElementById('register-form').style.display = 'none';
+      document.getElementById('auth-title').textContent = 'Login to Karan';
+    }
+
+    function switchToRegister() {
+      document.getElementById('login-form').style.display = 'none';
+      document.getElementById('register-form').style.display = 'block';
+      document.getElementById('auth-title').textContent = 'Register as Owner';
+    }
+
+    async function handleLogin() {
+      const id = document.getElementById('login-id').value.trim();
+      const password = document.getElementById('login-password').value;
+      if (!id || !password) { alert('Please fill all fields'); return; }
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, password })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          sessionId = data.sessionId;
+          localStorage.setItem('sessionId', sessionId);
+          hideAuthModal();
+          location.reload();
+        } else {
+          alert('Login failed: ' + data.error);
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function handleRegister() {
+      const id = document.getElementById('register-id').value.trim();
+      const name = document.getElementById('register-name').value.trim();
+      const password = document.getElementById('register-password').value;
+      const secret = document.getElementById('register-secret').value;
+      if (!id || !name || !password) { alert('Please fill all fields'); return; }
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, name, password, secret: secret || undefined })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          sessionId = data.sessionId;
+          localStorage.setItem('sessionId', sessionId);
+          hideAuthModal();
+          location.reload();
+        } else {
+          alert('Registration failed: ' + data.error);
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
     }
 
     function addMessage(text, type = 'assistant') {
@@ -928,6 +1142,10 @@ function getIndexHTML() {
 
     // Load initial data
     (async () => {
+      if (!sessionId) {
+        showAuthModal();
+        return;
+      }
       try {
         const data = await api('/health');
         if (!data.ok) location.reload();
