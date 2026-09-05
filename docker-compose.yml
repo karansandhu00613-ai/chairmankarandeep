@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  chairman:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chairman-agent-os
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: development
+      PORT: 8080
+      PRODUCTION: 0
+      STORE: local
+      # Enable these for cloud deployment:
+      # STORE: github
+      # GH_TOKEN: ${GH_TOKEN}
+      # GH_REPO: ${GH_REPO}
+      # SLACK_WEBHOOK: ${SLACK_WEBHOOK}
+      # DISCORD_WEBHOOK: ${DISCORD_WEBHOOK}
+    volumes:
+      - ./data.json:/app/data.json
+      - ./sessions.json:/app/sessions.json
+      - ./chairman-enhanced.js:/app/chairman-enhanced.js:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - chairman-net
+    labels:
+      - "com.example.description=Chairman Agent OS"
+
+  # Optional: PostgreSQL for future database support
+  postgres:
+    image: postgres:15-alpine
+    container_name: chairman-db
+    environment:
+      POSTGRES_DB: chairman
+      POSTGRES_USER: chairman
+      POSTGRES_PASSWORD: chairman123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - chairman-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chairman"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - with-db
+
+volumes:
+  postgres_data:
+
+networks:
+  chairman-net:
+    driver: bridge
