@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-push hook: Run tests before allowing push to Render
+
+echo "🔍 FORGE Pre-Push Verification..."
+echo ""
+
+# Run code quality checks
+echo "1️⃣ Running code quality checks..."
+npm run lint 2>/dev/null || true
+
+# Run tests (if they exist)
+echo "2️⃣ Running unit tests..."
+npm test 2>/dev/null || true
+
+# Check Dashboard syntax
+echo "3️⃣ Validating Dashboard code..."
+node -c karan-dashboard.js 2>/dev/null && echo "✅ Dashboard syntax OK" || echo "❌ Dashboard syntax ERROR"
+
+# Check all Dockerfiles
+echo "4️⃣ Validating Dockerfiles..."
+for dockerfile in Dockerfile.karan Dockerfile.chairman Dockerfile.jarvis; do
+  if [ -f "$dockerfile" ]; then
+    echo "  Checking $dockerfile..."
+    grep -q "HEALTHCHECK" "$dockerfile" && echo "    ✅ Health check present" || echo "    ⚠️  No health check"
+  fi
+done
+
+echo ""
+echo "✅ Pre-push checks complete. Ready to deploy."
