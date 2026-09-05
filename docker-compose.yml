@@ -1,6 +1,42 @@
 version: '3.8'
 
 services:
+  # Karan Dashboard - Unified web interface (port 8000)
+  dashboard:
+    image: node:18-alpine
+    container_name: karan-dashboard
+    ports:
+      - "8000:8000"
+    working_dir: /app
+    volumes:
+      - ./karan-dashboard.js:/app/karan-dashboard.js:ro
+      - ./dashboard.json:/app/dashboard.json
+      - ./dashboard-sessions.json:/app/dashboard-sessions.json
+    command: node karan-dashboard.js
+    environment:
+      NODE_ENV: development
+      PORT: 8000
+      PRODUCTION: 0
+      STORE: local
+      KARAN_API: http://karan:9000
+      CHAIRMAN_API: http://chairman:8080
+      JARVIS_API: http://jarvis:8001
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - karan
+      - chairman
+      - jarvis
+    networks:
+      - chairman-net
+    labels:
+      - "com.example.description=Karan Dashboard"
+
   chairman:
     build:
       context: .
