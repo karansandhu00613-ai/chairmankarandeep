@@ -455,10 +455,14 @@ ${baseStyles()}
   }
   .svc:hover { transform: translateY(-2px); }
   .svc.up { border-color: rgba(212,165,165,.34); }
-  .svc.down { border-color: rgba(240,144,159,.3); }
+  .svc.down { border-color: rgba(240,144,159,.6); background: rgba(240,144,159,.08); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .svc.up .dot { background: var(--accent); box-shadow: 0 0 0 0 rgba(212,165,165,.6); animation: ping 2s ease-out infinite; }
-  .svc.down .dot { background: var(--danger); }
+  /* Offline is signalled by shape, not hue: a hollow ring against the filled,
+     pulsing dot of a healthy service. Two pinks in one palette are too close to
+     tell apart at a glance, and this stays readable in any theme. */
+  .svc.down .dot { background: transparent; border: 2px solid var(--danger); }
+  .svc.down .name, .svc.down .sub { opacity: .8; }
   @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(212,165,165,.55); } 70% { box-shadow: 0 0 0 9px rgba(212,165,165,0); } 100% { box-shadow: 0 0 0 0 rgba(212,165,165,0); } }
   .svc .name { font-weight: 600; font-size: 14px; text-transform: capitalize; }
   .svc .sub { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; margin-top: 2px; }
