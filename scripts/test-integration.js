@@ -1,232 +1,160 @@
 #!/usr/bin/env node
 /**
- * FORGE Integration Test Suite
- * Verifies complete end-to-end automation system
+ * Behavioural tests for the watchdog.
+ *
+ * These run the real script against real HTTP servers and assert on what it
+ * actually did. The previous version of this file only checked that certain
+ * strings existed in certain files, which is how a set of "auto-fix agents"
+ * that returned hardcoded success passed a full suite while repairing nothing.
  */
 
-const fs = require('fs');
+const http = require('http');
 const path = require('path');
+const { spawn } = require('child_process');
 
-const testResults = [];
+const WATCHDOG = path.join(__dirname, 'watchdog.js');
+let passed = 0;
+let failed = 0;
 
-function test(name, fn) {
+async function test(name, fn) {
   try {
-    fn();
-    testResults.push({ name, status: '✅ PASS', error: null });
+    await fn();
     console.log(`✅ ${name}`);
+    passed++;
   } catch (e) {
-    testResults.push({ name, status: '❌ FAIL', error: e.message });
     console.log(`❌ ${name}: ${e.message}`);
+    failed++;
   }
 }
 
-console.log('\n🔗 FORGE Integration Test Suite\n');
+function startServer(port, handler) {
+  const server = http.createServer(handler);
+  server.listen(port);
+  return server;
+}
 
-// Test 1: All system components exist
-test('All system scripts exist', () => {
-  const scripts = [
-    'test-all.js',
-    'lint-check.js',
-    'health-check.js',
-    'monitor-services.js',
-    'error-logger.js',
-    'notify.js',
-    'auto-fix-orchestrator.js',
-    'render-integration.js'
-  ];
-  scripts.forEach(s => {
-    const filePath = path.join('/home/user/-chairmankarandeep', 'scripts', s);
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`Missing: ${s}`);
-    }
-  });
-});
-
-// Test 2: Error logger is properly initialized
-test('Error logger creates log directory', () => {
-  const ErrorLogger = require('./error-logger');
-  const logDir = path.join('/home/user/-chairmankarandeep', 'logs');
-  if (!fs.existsSync(logDir)) {
-    throw new Error('Log directory not created');
-  }
-});
-
-// Test 3: Services configuration
-test('All backend services have health endpoints', () => {
-  const services = ['karan', 'chairman', 'jarvis'];
-  const dashboard = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'karan-dashboard.js'), 'utf8');
-
-  services.forEach(service => {
-    const proxy = `/api/${service}/`;
-    if (!dashboard.includes(proxy)) {
-      throw new Error(`Missing proxy route for ${service}`);
-    }
-  });
-});
-
-// Test 4: Auto-fix orchestrator has all agents
-test('Auto-fix orchestrator has 5 specialist agents', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'auto-fix-orchestrator.js'), 'utf8');
-
-  const agents = [
-    'DiagnosticsAgent',
-    'DashboardFixerAgent',
-    'ServiceRecoveryAgent',
-    'EnvironmentValidatorAgent',
-    'DeploymentAnalyzerAgent'
-  ];
-
-  agents.forEach(agent => {
-    if (!code.includes(`class ${agent}`)) {
-      throw new Error(`Missing agent: ${agent}`);
-    }
-  });
-});
-
-// Test 5: Render integration webhook is configured
-test('Render integration webhook server configured', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'render-integration.js'), 'utf8');
-
-  if (!code.includes('/webhook/render')) throw new Error('No webhook endpoint');
-  if (!code.includes('handleDeploymentEvent')) throw new Error('No event handler');
-  if (!code.includes('checkServiceHealth')) throw new Error('No health check');
-});
-
-// Test 6: Error handling for all deployment statuses
-test('Render integration handles all deployment states', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'render-integration.js'), 'utf8');
-
-  const states = ['building', 'deploy_in_progress', 'live', 'build_failed', 'deploy_failed'];
-  states.forEach(state => {
-    if (!code.includes(`'${state}'`)) {
-      throw new Error(`Missing handler for state: ${state}`);
-    }
-  });
-});
-
-// Test 7: Notification system has all event types
-test('Notification system covers all event types', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'notify.js'), 'utf8');
-
-  const types = [
-    'service_down',
-    'service_recovered',
-    'auto_fix_applied',
-    'deployment_error',
-    'auth_failure'
-  ];
-
-  types.forEach(type => {
-    if (!code.includes(`'${type}'`)) {
-      throw new Error(`Missing notification type: ${type}`);
-    }
-  });
-});
-
-// Test 8: Monitoring system checks all services
-test('Monitoring system tracks all services', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'monitor-services.js'), 'utf8');
-
-  const services = ['dashboard', 'karan', 'chairman', 'jarvis'];
-  services.forEach(service => {
-    if (!code.includes(service)) {
-      throw new Error(`Service ${service} not monitored`);
-    }
-  });
-});
-
-// Test 9: Pre-deployment testing via lint and test
-test('Pre-deployment validation scripts exist', () => {
-  const lint = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'lint-check.js'), 'utf8');
-  const test = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'test-all.js'), 'utf8');
-
-  if (!lint.includes('hardcoded') && !lint.includes('secret')) {
-    throw new Error('Lint check missing security validation');
-  }
-
-  if (!test.includes('test(')) {
-    throw new Error('Test suite malformed');
-  }
-});
-
-// Test 10: Git hooks prevent bad deployments
-test('Pre-push git hook blocks bad code', () => {
-  const hook = path.join('/home/user/-chairmankarandeep', '.husky', 'pre-push');
-  if (!fs.existsSync(hook)) {
-    throw new Error('Git hook not configured');
-  }
-
-  const hookCode = fs.readFileSync(hook, 'utf8');
-  const hasLint = hookCode.includes('npm run lint') || hookCode.includes('lint');
-  const hasTest = hookCode.includes('npm test') || hookCode.includes('npm run test');
-  const hasBlocking = hookCode.includes('exit 1') || hookCode.includes('FAILED');
-
-  if (!hasLint) throw new Error('Git hook missing lint validation');
-  if (!hasTest) throw new Error('Git hook missing test validation');
-  if (!hasBlocking) throw new Error('Git hook does not block bad pushes');
-});
-
-// Test 11: Automation decision logic
-test('Auto-fix responds to root causes', () => {
-  const code = fs.readFileSync(path.join('/home/user/-chairmankarandeep', 'scripts', 'auto-fix-orchestrator.js'), 'utf8');
-
-  const causes = [
-    'bad_deployment',
-    'missing_env_vars',
-    'service_crashed',
-    'service_timeout'
-  ];
-
-  causes.forEach(cause => {
-    if (!code.includes(cause)) {
-      throw new Error(`No handling for root cause: ${cause}`);
-    }
-  });
-});
-
-// Test 12: Service health endpoints
-test('All services define health check endpoints', () => {
-  const services = [
-    'karan-chief-operator.js',
-    'chairman-enhanced.js',
-    'jarvis.js'
-  ];
-
-  services.forEach(service => {
-    const filePath = path.join('/home/user/-chairmankarandeep', service);
-    if (fs.existsSync(filePath)) {
-      const code = fs.readFileSync(filePath, 'utf8');
-      if (!code.includes('/api/health') && !code.includes('health')) {
-        throw new Error(`${service} missing health endpoint`);
+// Run the watchdog with every service pointed at the given base URLs.
+function runWatchdog(urls, extraEnv = {}) {
+  return new Promise(resolve => {
+    const child = spawn(process.execPath, [WATCHDOG], {
+      env: {
+        ...process.env,
+        RENDER_API_KEY: '',
+        HEALTH_TIMEOUT_MS: '2000',
+        DASHBOARD_URL: urls.dashboard,
+        KARAN_API: urls.karan,
+        CHAIRMAN_API: urls.chairman,
+        JARVIS_API: urls.jarvis,
+        ...extraEnv
       }
+    });
+    let out = '';
+    child.stdout.on('data', d => out += d);
+    child.stderr.on('data', d => out += d);
+    child.on('close', code => resolve({ code, out }));
+  });
+}
+
+const healthy = (req, res) => {
+  if (req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ status: 'ok' }));
+  }
+  res.writeHead(404);
+  res.end();
+};
+
+async function main() {
+console.log('\n🔧 Watchdog behaviour tests\n');
+
+const PORTS = { dashboard: 18801, karan: 18802, chairman: 18803, jarvis: 18804 };
+const url = p => `http://127.0.0.1:${p}`;
+const allUrls = {
+  dashboard: url(PORTS.dashboard),
+  karan: url(PORTS.karan),
+  chairman: url(PORTS.chairman),
+  jarvis: url(PORTS.jarvis)
+};
+
+const servers = Object.values(PORTS).map(p => startServer(p, healthy));
+
+try {
+  await test('Reports success and exits 0 when every service is healthy', async () => {
+    const { code, out } = await runWatchdog(allUrls);
+    if (code !== 0) throw new Error(`expected exit 0, got ${code}\n${out}`);
+    if (!out.includes('All services healthy')) throw new Error('did not report all healthy');
+  });
+
+  await test('Requests each health endpoint, which is what keeps services awake', async () => {
+    let hits = 0;
+    const counter = startServer(18810, (req, res) => {
+      if (req.url === '/api/health') hits++;
+      healthy(req, res);
+    });
+    try {
+      await runWatchdog({ ...allUrls, karan: url(18810) });
+      if (hits < 1) throw new Error('health endpoint was never requested');
+    } finally {
+      counter.close();
     }
   });
-});
 
-// Print results
-console.log(`\n${'='.repeat(50)}`);
-console.log(`📊 Integration Test Results`);
-console.log(`${'='.repeat(50)}\n`);
-
-const passed = testResults.filter(r => r.status.includes('PASS')).length;
-const failed = testResults.filter(r => r.status.includes('FAIL')).length;
-
-console.log(`Total: ${testResults.length} | Passed: ${passed} | Failed: ${failed}\n`);
-
-if (failed > 0) {
-  console.log('Failed tests:');
-  testResults.filter(r => r.status.includes('FAIL')).forEach(r => {
-    console.log(`  ❌ ${r.name}: ${r.error}`);
+  // A single failed request is not proof of an outage. Restarting on one blip
+  // would cause the very downtime the watchdog exists to prevent.
+  await test('Re-checks a failing service before attempting any repair', async () => {
+    const { out } = await runWatchdog({ ...allUrls, karan: url(18899) });
+    if (!out.includes('Re-checking before acting')) throw new Error('acted without a second check');
   });
-  console.log('');
-  process.exit(1);
-} else {
-  console.log('✅ All integration tests passed!\n');
-  console.log('System is ready for deployment with:');
-  console.log('  • 5-layer error prevention');
-  console.log('  • 24/7 service monitoring');
-  console.log('  • Automated diagnostics and fixing');
-  console.log('  • Real-time notifications');
-  console.log('  • Render webhook integration\n');
-  process.exit(0);
+
+  await test('Detects a genuinely down service and exits non-zero', async () => {
+    const { code, out } = await runWatchdog({ ...allUrls, karan: url(18899) });
+    if (code === 0) throw new Error('reported success while a service was down');
+    if (!out.includes('still down')) throw new Error('did not report the service as down');
+  });
+
+  await test('Treats a non-200 response as unhealthy, not merely a reachable host', async () => {
+    const broken = startServer(18811, (req, res) => { res.writeHead(500); res.end('{}'); });
+    try {
+      const { code, out } = await runWatchdog({ ...allUrls, karan: url(18811) });
+      if (code === 0) throw new Error('a 500 response was treated as healthy');
+      if (!out.includes('HTTP 500')) throw new Error('did not surface the status code');
+    } finally {
+      broken.close();
+    }
+  });
+
+  // Without credentials it must say so rather than implying a repair happened.
+  await test('States plainly that it cannot repair without an API key', async () => {
+    const { out } = await runWatchdog({ ...allUrls, karan: url(18899) });
+    if (!out.includes('RENDER_API_KEY is not set')) throw new Error('did not explain why no repair ran');
+    if (/rollback accepted|restart accepted/.test(out)) throw new Error('claimed a repair it never made');
+  });
+
+  await test('Never claims a repair succeeded without a confirming API response', async () => {
+    const src = require('fs').readFileSync(WATCHDOG, 'utf8');
+    if (!/confirmed:\s*res\.status\s*>=\s*200/.test(src)) {
+      throw new Error('success is not derived from a real HTTP status');
+    }
+    if (/confirmed:\s*true\b/.test(src)) {
+      throw new Error('hardcoded success found');
+    }
+  });
+
+  await test('Scheduled workflow exists and runs the watchdog', async () => {
+    const fs = require('fs');
+    const wf = path.join(__dirname, '..', '.github', 'workflows', 'watchdog.yml');
+    if (!fs.existsSync(wf)) throw new Error('no workflow; nothing would ever run the watchdog');
+    const yml = fs.readFileSync(wf, 'utf8');
+    if (!yml.includes('cron:')) throw new Error('workflow has no schedule');
+    if (!yml.includes('scripts/watchdog.js')) throw new Error('workflow does not run the watchdog');
+    if (!yml.includes('RENDER_API_KEY')) throw new Error('workflow does not pass the API key');
+  });
+} finally {
+  servers.forEach(s => s.close());
 }
+
+console.log(`\n📊 ${passed} passed, ${failed} failed\n`);
+process.exit(failed ? 1 : 0);
+}
+
+main().catch(e => { console.error(e); process.exit(1); });

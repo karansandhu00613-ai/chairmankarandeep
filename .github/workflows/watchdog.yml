@@ -1,0 +1,116 @@
+name: Service watchdog
+
+# Runs outside Render, so it still works when every service is down — which is
+# exactly when an in-process monitor would be unable to help.
+on:
+  schedule:
+    # Every 5 minutes is the finest granularity GitHub offers, and scheduled runs
+    # are best-effort: under load GitHub can delay them by several minutes.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Diagnose and report the repair without carrying it out'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check services and repair what is repairable
+        id: watchdog
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set +e
+          node scripts/watchdog.js ${{ inputs.dry_run && '--dry-run' || '' }} 2>&1 | tee /tmp/watchdog.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Raise an issue for anything it could not repair
+        if: steps.watchdog.outputs.exit_code != '0' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = fs.readFileSync('/tmp/watchdog.log', 'utf8');
+            const title = 'Service down: watchdog could not repair it';
+            const body = [
+              'The watchdog found a service still failing after a retry, and could',
+              'not bring it back automatically. This usually means a code change or',
+              'a corrected secret is needed, rather than a restart.',
+              '',
+              '```',
+              log.trim().slice(0, 60000),
+              '```',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            ].join('\n');
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'service-down'
+            });
+
+            // One issue per outage, commented on as it continues, so a long
+            // outage does not open an issue every five minutes.
+            if (open.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body: 'Still failing.\n\n```\n' + log.trim().slice(0, 60000) + '\n```'
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['service-down']
+              });
+            }
+
+      - name: Close the outage issue once everything is healthy again
+        if: steps.watchdog.outputs.exit_code == '0' && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'service-down'
+            });
+            for (const issue of open) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: 'All services healthy again. Closing.'
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed'
+              });
+            }
