@@ -15,6 +15,9 @@ const PORT = parseInt(process.env.PORT || '8000');
 const PRODUCTION = parseInt(process.env.PRODUCTION || '0');
 const STORE_TYPE = process.env.STORE || 'local';
 
+// Force local storage if GH_TOKEN not set
+const ACTUAL_STORE = (!process.env.GH_TOKEN || STORE_TYPE === 'local') ? 'local' : STORE_TYPE;
+
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
 const CHAIRMAN_API = process.env.CHAIRMAN_API || 'http://localhost:8080';
 const JARVIS_API = process.env.JARVIS_API || 'http://localhost:8001';
@@ -36,7 +39,7 @@ const TTL = 7 * 24 * 60 * 60 * 1000;
 const DB = 'dashboard.json';
 const SESSDB = 'dashboard-sessions.json';
 
-let STORE = STORE_TYPE === 'github' ? githubStore() : localStore('.');
+let STORE = ACTUAL_STORE === 'github' ? githubStore() : localStore('.');
 
 function uid() { return crypto.randomBytes(16).toString('hex'); }
 
