@@ -98,6 +98,29 @@ test('Login page has no self-redirect loop', () => {
   if (code.includes("'/?sessionId='")) throw new Error('Session token passed via URL');
 });
 
+// The browser's JavaScript lives inside server-side template literals, so
+// `node --check` on this file cannot see it. An escape like \n is consumed by the
+// template and reaches the browser as a real newline, breaking the script silently:
+// the page renders but no event handler ever attaches. Parse what is actually served.
+test('Client-side JavaScript in both pages parses', () => {
+  const dash = require('/home/user/-chairmankarandeep/karan-dashboard.js');
+  const pages = { login: dash.getLoginHTML(), dashboard: dash.getDashboardHTML() };
+
+  Object.entries(pages).forEach(([label, html]) => {
+    const blocks = html.match(/<script>([\s\S]*?)<\/script>/g) || [];
+    if (!blocks.length) throw new Error(`${label} page has no script block`);
+
+    blocks.forEach((block, i) => {
+      const code = block.replace(/^<script>/, '').replace(/<\/script>$/, '');
+      const r = spawnSync(process.execPath, ['--check'], { input: code });
+      if (r.status !== 0) {
+        const detail = r.stderr.toString().split('\n').filter(Boolean).slice(0, 4).join(' ').trim();
+        throw new Error(`${label} page, script ${i + 1}: ${detail}`);
+      }
+    });
+  });
+});
+
 // Test 4: Check session management
 test('Session management implemented', () => {
   const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');

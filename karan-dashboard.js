@@ -91,11 +91,17 @@ function sessionCookie(req, token) {
 function getSetupHTML() {
   return `<!DOCTYPE html>
 <html>
-<head><title>Karan Dashboard - Setup</title><meta charset="utf-8">
+<head><title>${BRAND} - Setup</title><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; padding: 40px; }
-  .box { background: white; padding: 32px; border-radius: 8px; max-width: 620px; margin: 0 auto; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-  code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #2b1e3e; color: #e6e6fa; margin: 0; padding: 40px; }
+  .box { background: rgba(230,230,250,.055); border: 1px solid rgba(164,144,194,.24);
+         padding: 32px; border-radius: 16px; max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 14px; }
+  p { line-height: 1.7; color: rgba(230,230,250,.72); }
+  code { background: rgba(164,144,194,.18); color: #c3b4dc; padding: 2px 7px;
+         border-radius: 5px; font-size: 13px; }
   li { margin: 10px 0; line-height: 1.6; }
 </style>
 </head>
@@ -257,23 +263,26 @@ function proxyRequest(baseUrl, path, method, body) {
 function baseStyles() {
   return `
     :root {
-      --bg: #070b14; --ink: #e8edf5; --muted: #8b97ab;
-      --line: rgba(255,255,255,.09); --glass: rgba(255,255,255,.045);
-      --accent: #10b981; --accent-soft: rgba(16,185,129,.16); --danger: #f43f5e;
+      /* Midnight Galaxy: deep purple base, cosmic blue mid-tone,
+         lavender accent, silver text. */
+      --bg: #2b1e3e; --ink: #e6e6fa; --muted: rgba(230,230,250,.58);
+      --line: rgba(164,144,194,.24); --glass: rgba(230,230,250,.055);
+      --accent: #a490c2; --accent-lift: #c3b4dc; --on-accent: #241a33;
+      --accent-soft: rgba(164,144,194,.18); --cosmic: #4a4e8f; --danger: #e08aa4;
       --radius: 16px;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       background: var(--bg); color: var(--ink);
       min-height: 100vh; overflow-x: hidden; -webkit-font-smoothing: antialiased;
     }
     /* Drifting aurora field */
     .aurora { position: fixed; inset: -30%; z-index: 0; filter: blur(90px); opacity: .55; pointer-events: none; }
     .aurora span { position: absolute; border-radius: 50%; display: block; }
-    .aurora .a1 { width: 45vw; height: 45vw; left: 5%;  top: 5%;  background: #0f766e; animation: drift1 22s ease-in-out infinite; }
-    .aurora .a2 { width: 38vw; height: 38vw; right: 8%; top: 25%; background: #1d4ed8; animation: drift2 27s ease-in-out infinite; }
-    .aurora .a3 { width: 32vw; height: 32vw; left: 32%; bottom: 2%; background: #059669; animation: drift3 31s ease-in-out infinite; }
+    .aurora .a1 { width: 45vw; height: 45vw; left: 5%;  top: 5%;  background: #4a4e8f; animation: drift1 22s ease-in-out infinite; }
+    .aurora .a2 { width: 38vw; height: 38vw; right: 8%; top: 25%; background: #7b5fa8; animation: drift2 27s ease-in-out infinite; }
+    .aurora .a3 { width: 32vw; height: 32vw; left: 32%; bottom: 2%; background: #59407f; animation: drift3 31s ease-in-out infinite; }
     @keyframes drift1 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(9vw,7vh) scale(1.18); } }
     @keyframes drift2 { 0%,100% { transform: translate(0,0) scale(1.1); } 50% { transform: translate(-8vw,10vh) scale(.9); } }
     @keyframes drift3 { 0%,100% { transform: translate(0,0) scale(.95); } 50% { transform: translate(6vw,-8vh) scale(1.2); } }
@@ -294,12 +303,12 @@ function baseStyles() {
     }
     @keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
     button {
-      font: inherit; font-weight: 600; cursor: pointer; color: #04140e;
-      background: linear-gradient(135deg, #34d399, var(--accent));
+      font: inherit; font-weight: 600; cursor: pointer; color: var(--on-accent);
+      background: linear-gradient(135deg, var(--accent-lift), var(--accent));
       border: none; border-radius: 10px; padding: 12px 18px;
       transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
     }
-    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(16,185,129,.3); }
+    button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(164,144,194,.3); }
     button:disabled { filter: grayscale(.6); opacity: .6; cursor: default; }
     input, textarea {
       font: inherit; width: 100%; color: var(--ink);
@@ -308,7 +317,7 @@ function baseStyles() {
     }
     input::placeholder { color: var(--muted); }
     input:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-    .error { color: #fda4af; font-size: 13px; min-height: 18px; }
+    .error { color: var(--danger); font-size: 13px; min-height: 18px; }
     ::-webkit-scrollbar { width: 9px; height: 9px; }
     ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 8px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -325,13 +334,10 @@ function getLoginHTML() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${BRAND}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 ${baseStyles()}
   .wrap { position: relative; z-index: 2; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  .card { width: 100%; max-width: 400px; padding: 40px 34px; animation: rise .7s cubic-bezier(.2,.8,.2,1) both; }
+  .card { width: 100%; max-width: 400px; padding: 40px 34px; animation: rise .7s cubic-bezier(.2,.8,.2,1); }
   @keyframes rise { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
   .card .brand { justify-content: center; font-size: 22px; margin-bottom: 6px; }
   .sub { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 30px; }
@@ -411,9 +417,6 @@ function getDashboardHTML() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${BRAND} · Command Center</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 ${baseStyles()}
   .shell { position: relative; z-index: 2; display: grid; grid-template-columns: 248px 1fr; gap: 20px; padding: 20px; min-height: 100vh; }
@@ -425,19 +428,19 @@ ${baseStyles()}
     border: 1px solid transparent; transition: all .2s ease;
   }
   .nav-item:hover { background: rgba(255,255,255,.05); color: var(--ink); transform: translateX(3px); }
-  .nav-item.active { background: var(--accent-soft); color: #6ee7b7; border-color: rgba(16,185,129,.3); }
+  .nav-item.active { background: var(--accent-soft); color: var(--accent-lift); border-color: rgba(164,144,194,.3); }
   .nav-item .ico { width: 17px; text-align: center; }
 
   main { min-width: 0; }
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 22px; margin-bottom: 18px; }
   .topbar h1 { font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
   .topbar .meta { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 12.5px; }
-  .clock { font-family: 'JetBrains Mono', monospace; }
+  .clock { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
   .ghost { background: rgba(255,255,255,.06); color: var(--ink); border: 1px solid var(--line); padding: 9px 15px; font-size: 13px; }
   .ghost:hover { box-shadow: none; background: rgba(255,255,255,.1); }
 
-  .section { display: none; animation: fade .45s cubic-bezier(.2,.8,.2,1) both; }
-  .section.active { display: block; }
+  .section { display: none; }
+  .section.active { display: block; animation: fade .45s cubic-bezier(.2,.8,.2,1); }
   @keyframes fade { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
   .panel { padding: 24px; margin-bottom: 18px; }
@@ -451,27 +454,27 @@ ${baseStyles()}
     transition: border-color .3s, transform .2s;
   }
   .svc:hover { transform: translateY(-2px); }
-  .svc.up { border-color: rgba(16,185,129,.34); }
-  .svc.down { border-color: rgba(244,63,94,.3); }
+  .svc.up { border-color: rgba(164,144,194,.34); }
+  .svc.down { border-color: rgba(224,138,164,.3); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .svc.up .dot { background: var(--accent); box-shadow: 0 0 0 0 rgba(16,185,129,.6); animation: ping 2s ease-out infinite; }
+  .svc.up .dot { background: var(--accent); box-shadow: 0 0 0 0 rgba(164,144,194,.6); animation: ping 2s ease-out infinite; }
   .svc.down .dot { background: var(--danger); }
-  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.55); } 70% { box-shadow: 0 0 0 9px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(164,144,194,.55); } 70% { box-shadow: 0 0 0 9px rgba(164,144,194,0); } 100% { box-shadow: 0 0 0 0 rgba(164,144,194,0); } }
   .svc .name { font-weight: 600; font-size: 14px; text-transform: capitalize; }
-  .svc .sub { color: var(--muted); font-size: 11.5px; font-family: 'JetBrains Mono', monospace; margin-top: 2px; }
+  .svc .sub { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; margin-top: 2px; }
 
   .log {
-    font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.65;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.65;
     background: rgba(0,0,0,.32); border: 1px solid var(--line); border-radius: 12px;
     padding: 15px; max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
-    color: #a7f3d0;
+    color: #d6c9e8;
   }
   .chat-log { height: 330px; overflow-y: auto; display: flex; flex-direction: column; gap: 11px; margin-bottom: 14px; padding: 4px; }
-  .msg { max-width: 78%; padding: 11px 15px; border-radius: 14px; font-size: 14px; line-height: 1.5; animation: pop .35s cubic-bezier(.2,.8,.2,1) both; }
+  .msg { max-width: 78%; padding: 11px 15px; border-radius: 14px; font-size: 14px; line-height: 1.5; animation: pop .35s cubic-bezier(.2,.8,.2,1); }
   @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
-  .msg.me { align-self: flex-end; background: linear-gradient(135deg,#34d399,var(--accent)); color: #04140e; border-bottom-right-radius: 4px; }
+  .msg.me { align-self: flex-end; background: linear-gradient(135deg,var(--accent-lift),var(--accent)); color: var(--on-accent); border-bottom-right-radius: 4px; }
   .msg.them { align-self: flex-start; background: rgba(255,255,255,.07); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
-  .msg.sys { align-self: center; background: rgba(244,63,94,.12); border: 1px solid rgba(244,63,94,.3); color: #fda4af; font-size: 12.5px; }
+  .msg.sys { align-self: center; background: rgba(224,138,164,.12); border: 1px solid rgba(224,138,164,.3); color: var(--danger); font-size: 12.5px; }
   .row { display: flex; gap: 10px; }
   .row input { flex: 1; }
 
@@ -650,7 +653,7 @@ ${baseStyles()}
       var data = await res.json().catch(function () { return {}; });
       out.textContent = res.ok
         ? JSON.stringify(data, null, 2)
-        : 'HTTP ' + res.status + '\n' + JSON.stringify(data, null, 2);
+        : 'HTTP ' + res.status + '\\n' + JSON.stringify(data, null, 2);
     } catch (e) {
       out.textContent = 'Request failed: ' + e.message;
     }
@@ -664,6 +667,11 @@ ${baseStyles()}
 </body>
 </html>`;
 }
+
+module.exports = { getLoginHTML, getDashboardHTML, baseStyles };
+
+// Importing this file (the test suite parses the pages it serves) must not bind a port.
+if (require.main !== module) return;
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n${BRAND} dashboard running on http://localhost:${PORT}\n`);
