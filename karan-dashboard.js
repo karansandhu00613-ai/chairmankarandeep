@@ -271,8 +271,8 @@ function getLoginHTML() {
     <h1>🚀 FORGE</h1>
 
     <div class="tabs">
-      <div class="tab active" onclick="showTab('login')">Login</div>
-      <div class="tab" onclick="showTab('register')">Register</div>
+      <div class="tab active" data-tab="login" onclick="showTab('login')">Login</div>
+      <div class="tab" data-tab="register" onclick="showTab('register')">Register</div>
     </div>
 
     <div id="login" class="tab-content active">
@@ -296,13 +296,13 @@ function getLoginHTML() {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
       document.getElementById(name).classList.add('active');
-      document.querySelector('[onclick="showTab(\'' + name + '\')"]').classList.add('active');
+      document.querySelector(`[data-tab="${name}"]`).classList.add('active');
     }
 
     async function handleLogin() {
       const email = document.getElementById('login-email').value.trim();
       const password = document.getElementById('login-password').value;
-      if (!email || !password) { alert('Please fill all fields'); return; }
+      if (!email || !password) { document.getElementById('login-error').textContent = 'Please fill all fields'; return; }
 
       try {
         const res = await fetch('/api/auth/login', {
@@ -310,12 +310,16 @@ function getLoginHTML() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, password })
         });
+        if (!res.ok) {
+          document.getElementById('login-error').textContent = `Server error: ${res.status}`;
+          return;
+        }
         const data = await res.json();
         if (data.ok) {
           localStorage.setItem('sessionId', data.sessionId);
           location.href = '/';
         } else {
-          document.getElementById('login-error').textContent = data.error;
+          document.getElementById('login-error').textContent = data.error || 'Login failed';
         }
       } catch(e) {
         document.getElementById('login-error').textContent = 'Error: ' + e.message;
@@ -326,7 +330,7 @@ function getLoginHTML() {
       const email = document.getElementById('register-email').value.trim();
       const name = document.getElementById('register-name').value.trim();
       const password = document.getElementById('register-password').value;
-      if (!email || !name || !password) { alert('Please fill all fields'); return; }
+      if (!email || !name || !password) { document.getElementById('register-error').textContent = 'Please fill all fields'; return; }
 
       try {
         const res = await fetch('/api/auth/register', {
@@ -334,12 +338,16 @@ function getLoginHTML() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email, name, password })
         });
+        if (!res.ok) {
+          document.getElementById('register-error').textContent = `Server error: ${res.status}`;
+          return;
+        }
         const data = await res.json();
         if (data.ok) {
           localStorage.setItem('sessionId', data.sessionId);
           location.href = '/';
         } else {
-          document.getElementById('register-error').textContent = data.error;
+          document.getElementById('register-error').textContent = data.error || 'Registration failed';
         }
       } catch(e) {
         document.getElementById('register-error').textContent = 'Error: ' + e.message;
