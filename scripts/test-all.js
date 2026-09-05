@@ -23,7 +23,7 @@ function test(name, fn) {
   }
 }
 
-console.log('\n🧪 FORGE Test Suite Running...\n');
+console.log('\n🧪 Test suite running...\n');
 
 // Test 1: Check all required files exist
 test('Required files exist', () => {
@@ -109,9 +109,18 @@ test('Session management implemented', () => {
 // Test 5: Check proxy routes
 test('Service proxy routes configured', () => {
   const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
-  if (!code.includes('/api/karan/')) throw new Error('No Karan proxy');
-  if (!code.includes('/api/chairman/')) throw new Error('No Chairman proxy');
-  if (!code.includes('/api/jarvis/')) throw new Error('No Jarvis proxy');
+  if (!/karan\|chairman\|jarvis/.test(code)) throw new Error('No backend proxy route');
+  if (!code.includes('x-service-token')) throw new Error('Proxy does not identify itself to backends');
+  if (!code.includes("pathname === '/api/status'")) throw new Error('No server-side status endpoint');
+});
+
+// Health must be checked server-side; a browser fetch straight to the backends is
+// cross-origin and silently fails for any service without CORS headers.
+test('Status checks do not rely on backend CORS', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  if (/fetch\(\s*'?\$\{(KARAN|CHAIRMAN|JARVIS)_API\}/.test(code)) {
+    throw new Error('Page fetches a backend URL directly from the browser');
+  }
 });
 
 // Test 6: Check error handling

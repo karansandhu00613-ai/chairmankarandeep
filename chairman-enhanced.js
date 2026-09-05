@@ -45,6 +45,8 @@ const tls = require('tls');
 // ============================================================================
 
 const PORT = parseInt(process.env.PORT || '8080');
+// Lets the dashboard call these APIs server-to-server without its own account.
+const SERVICE_TOKEN = process.env.SERVICE_TOKEN || '';
 const HOST = '0.0.0.0';
 const PRODUCTION = process.env.PRODUCTION === '1' || process.env.NODE_ENV === 'production';
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -612,7 +614,10 @@ async function handleAPI(req, res, pathname, query) {
   }
 
   // Protected endpoints
-  const sess = verifySession(query.get('sessionId'));
+  const sess = verifySession(query.get('sessionId')) ||
+    (SERVICE_TOKEN && req.headers['x-service-token'] === SERVICE_TOKEN
+      ? { userId: 'dashboard', service: true }
+      : null);
   if (!sess) return send(res, 401, { error: 'Unauthorized' });
 
   if (pathname === '/api/dashboard') {
