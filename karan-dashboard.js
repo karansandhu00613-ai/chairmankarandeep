@@ -296,7 +296,7 @@ function getLoginHTML() {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
       document.getElementById(name).classList.add('active');
-      document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+      document.querySelector('[data-tab="' + name + '"]').classList.add('active');
     }
 
     async function handleLogin() {
@@ -311,7 +311,7 @@ function getLoginHTML() {
           body: JSON.stringify({ email, password })
         });
         if (!res.ok) {
-          document.getElementById('login-error').textContent = `Server error: ${res.status}`;
+          document.getElementById('login-error').textContent = 'Server error: ' + res.status;
           return;
         }
         const data = await res.json();
@@ -339,7 +339,7 @@ function getLoginHTML() {
           body: JSON.stringify({ email, name, password })
         });
         if (!res.ok) {
-          document.getElementById('register-error').textContent = `Server error: ${res.status}`;
+          document.getElementById('register-error').textContent = 'Server error: ' + res.status;
           return;
         }
         const data = await res.json();
