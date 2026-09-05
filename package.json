@@ -8,8 +8,11 @@
     "start": "node chairman-enhanced.js",
     "dev": "NODE_ENV=development node chairman-enhanced.js",
     "prod": "PRODUCTION=1 NODE_ENV=production node chairman-enhanced.js",
-    "test": "echo \"No tests yet\"",
-    "lint": "echo \"No linter configured\""
+    "test": "node scripts/test-all.js",
+    "lint": "node scripts/lint-check.js",
+    "verify": "npm run lint && npm run test",
+    "health-check": "node scripts/health-check.js",
+    "monitor": "node scripts/monitor-services.js"
   },
   "keywords": [
     "agent",

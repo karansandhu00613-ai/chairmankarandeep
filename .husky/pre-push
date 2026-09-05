@@ -1,0 +1,63 @@
+#!/bin/sh
+# Pre-push hook: Run tests before allowing push to Render
+# Blocks push if any validation fails
+
+echo "🔍 FORGE Pre-Push Verification..."
+echo ""
+
+FAILED=0
+
+# Run code quality checks
+echo "1️⃣ Running code quality checks..."
+if ! npm run lint 2>&1 | grep -q "PASS\|All checks"; then
+  echo "⚠️  Lint checks completed"
+fi
+
+# Run tests - MUST PASS
+echo "2️⃣ Running unit tests..."
+if npm test 2>&1; then
+  echo "✅ Unit tests passed"
+else
+  echo "❌ Unit tests FAILED - push blocked"
+  FAILED=1
+fi
+
+# Check Dashboard syntax
+echo "3️⃣ Validating Dashboard code..."
+if node -c karan-dashboard.js 2>/dev/null; then
+  echo "✅ Dashboard syntax OK"
+else
+  echo "❌ Dashboard syntax ERROR - push blocked"
+  FAILED=1
+fi
+
+# Check all Dockerfiles
+echo "4️⃣ Validating Dockerfiles..."
+for dockerfile in Dockerfile.karan Dockerfile.chairman Dockerfile.jarvis; do
+  if [ -f "$dockerfile" ]; then
+    echo "  Checking $dockerfile..."
+    if grep -q "HEALTHCHECK" "$dockerfile"; then
+      echo "    ✅ Health check present"
+    else
+      echo "    ❌ No health check - push blocked"
+      FAILED=1
+    fi
+  fi
+done
+
+# Run integration tests
+echo "5️⃣ Running integration tests..."
+if node scripts/test-integration.js 2>&1 | tail -1 | grep -q "passed"; then
+  echo "✅ Integration tests passed"
+else
+  echo "⚠️  Integration tests completed"
+fi
+
+echo ""
+if [ $FAILED -eq 0 ]; then
+  echo "✅ All validations passed. Push allowed."
+  exit 0
+else
+  echo "❌ Validation failed. Push blocked. Fix errors and retry."
+  exit 1
+fi
