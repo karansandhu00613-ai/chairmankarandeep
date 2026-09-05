@@ -805,12 +805,12 @@ server.on('upgrade', (req, socket, head) => {
     console.log(`   RUNNING ON:  http://localhost:${PORT}`);
     console.log(`   MODE:        ${PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'}`);
     console.log(`   STORE:       ${STORE.describe()}`);
-    console.log('\n   Features:`);
-    console.log(`     • Chat Interface: ✓ Active`);
-    console.log(`     • Task Management: ✓ Ready`);
-    console.log(`     • Project Management: ✓ Ready`);
-    console.log(`     • Chairman Integration: ${S.chairman.enabled ? '✓' : '✗'} ${S.chairman.enabled ? 'Connected' : 'Available'}`);
-    console.log(`     • Jarvis Integration: ${S.jarvis.enabled ? '✓' : '✗'} ${S.jarvis.enabled ? 'Connected' : 'Available'}`);
+    console.log('\n   Features:');
+    console.log('     • Chat Interface: ✓ Active');
+    console.log('     • Task Management: ✓ Ready');
+    console.log('     • Project Management: ✓ Ready');
+    console.log('     • Chairman Integration: ' + (S.chairman.enabled ? '✓' : '✗') + ' ' + (S.chairman.enabled ? 'Connected' : 'Available'));
+    console.log('     • Jarvis Integration: ' + (S.jarvis.enabled ? '✓' : '✗') + ' ' + (S.jarvis.enabled ? 'Connected' : 'Available'));
     console.log('\n════════════════════════════════════════════════════════\n');
   });
 })();
