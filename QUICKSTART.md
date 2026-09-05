@@ -1,6 +1,8 @@
-# Karan Dashboard - Quick Start Guide
+# FORGE - Quick Start Guide
 
-Complete AI operating system in one unified web interface. No external AI dependencies.
+The self-contained AI operating system. Complete control, zero external dependencies.
+
+*Formerly: Karan Dashboard (internal codename)*
 
 ## 🚀 One-Command Start
 
