@@ -1,308 +1,229 @@
 #!/usr/bin/env node
-/* ==========================================================================
-   KARAN DASHBOARD - Unified AI Operating System Interface
-
-   Port 8000 - ChatGPT/Claude.com-style interface
-   Orchestrates: Karan (9000), Chairman (8080), Jarvis (8001)
-   Multi-user with API keys, no external AI dependencies
-   ========================================================================== */
+/* KARAN DASHBOARD - FIXED & SIMPLIFIED */
 
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '8000');
-const PRODUCTION = parseInt(process.env.PRODUCTION || '0');
-const STORE_TYPE = process.env.STORE || 'local';
-
-// Force local storage if GH_TOKEN not set
-const ACTUAL_STORE = (!process.env.GH_TOKEN || STORE_TYPE === 'local') ? 'local' : STORE_TYPE;
-
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
 const CHAIRMAN_API = process.env.CHAIRMAN_API || 'http://localhost:8080';
 const JARVIS_API = process.env.JARVIS_API || 'http://localhost:8001';
 
-const GH_TOKEN = process.env.GH_TOKEN;
-const GH_REPO = process.env.GH_REPO;
-const GH_BRANCH = process.env.GH_BRANCH || 'main';
-
+// Simple state with user accounts
 let STATE = {
   users: {},
-  apiKeys: {},
-  sessions: {},
-  settings: {}
+  sessions: {}
 };
 
-const SESS = new Map();
-const WS_CLIENTS = new Map();
-const TTL = 7 * 24 * 60 * 60 * 1000;
-const DB = 'dashboard.json';
-const SESSDB = 'dashboard-sessions.json';
+const DB = 'dashboard-users.json';
+const SESSIONS_DB = 'dashboard-sessions.json';
 
-let STORE = ACTUAL_STORE === 'github' ? githubStore() : localStore('.');
-
-function uid() { return crypto.randomBytes(16).toString('hex'); }
-
-function localStore(dir) {
-  const fs = require('fs');
-  return {
-    describe: () => `Local (${dir})`,
-    read: async (name) => {
-      try { return fs.readFileSync(`${dir}/${name}`, 'utf8'); } catch(e) { return null; }
-    },
-    write: async (name, text) => {
-      fs.writeFileSync(`${dir}/${name}`, text);
-    }
-  };
-}
-
-function githubStore() {
-  return {
-    describe: () => `GitHub (${GH_REPO})`,
-    read: async (name) => {
-      const [owner, repoName] = GH_REPO.split('/');
-      try {
-        const res = await ghAPI('GET', `/repos/${owner}/${repoName}/contents/${name}?ref=${GH_BRANCH}`, GH_TOKEN);
-        return Buffer.from(res.content, 'base64').toString();
-      } catch(e) { return null; }
-    },
-    write: async (name, text) => {
-      const [owner, repoName] = GH_REPO.split('/');
-      let sha = null;
-      try {
-        const fileRes = await ghAPI('GET', `/repos/${owner}/${repoName}/contents/${name}?ref=${GH_BRANCH}`, GH_TOKEN);
-        sha = fileRes.sha;
-      } catch (e) {}
-      await ghAPI('PUT', `/repos/${owner}/${repoName}/contents/${name}`, GH_TOKEN, {
-        message: `Update ${name}`,
-        content: Buffer.from(text).toString('base64'),
-        sha
-      });
-    }
-  };
-}
-
-async function ghAPI(method, path, token, body) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'api.github.com',
-      path,
-      method,
-      headers: {
-        'Authorization': `token ${token}`,
-        'User-Agent': 'Karan-Dashboard',
-        'Content-Type': 'application/json'
-      }
-    }, res => {
-      let buf = '';
-      res.on('data', d => buf += d);
-      res.on('end', () => {
-        if (res.statusCode >= 400) return reject(new Error(`GitHub API ${res.statusCode}`));
-        try { resolve(JSON.parse(buf)); } catch(e) { resolve(buf); }
-      });
-    });
-    req.on('error', reject);
-    if (body) req.write(JSON.stringify(body));
-    req.end();
-  });
-}
-
-// Hash password with PBKDF2
-function hashPassword(password) {
-  const salt = crypto.randomBytes(32).toString('hex');
-  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  const [salt, hash] = stored.split(':');
-  const computed = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
-  return computed === hash;
-}
-
-// API Key management
-function generateAPIKey(userId) {
-  const key = crypto.randomBytes(32).toString('hex');
-  const hash = crypto.createHash('sha256').update(key).digest('hex');
-  const apiKey = {
-    id: uid(),
-    userId,
-    keyHash: hash,
-    createdAt: Date.now(),
-    lastUsed: null,
-    name: `API Key ${new Date().toLocaleDateString()}`
-  };
-  STATE.apiKeys[apiKey.id] = apiKey;
-  return key;
-}
-
-function verifyAPIKey(key) {
-  const hash = crypto.createHash('sha256').update(key).digest('hex');
-  for (const [id, apiKey] of Object.entries(STATE.apiKeys)) {
-    if (apiKey.keyHash === hash) {
-      apiKey.lastUsed = Date.now();
-      return apiKey.userId;
-    }
+// Load from disk
+function loadState() {
+  try {
+    const data = fs.readFileSync(DB, 'utf8');
+    STATE.users = JSON.parse(data);
+  } catch(e) {
+    STATE.users = {};
   }
-  return null;
+
+  try {
+    const data = fs.readFileSync(SESSIONS_DB, 'utf8');
+    STATE.sessions = JSON.parse(data);
+  } catch(e) {
+    STATE.sessions = {};
+  }
 }
 
-// Session management
+// Save to disk
+function saveUsers() {
+  fs.writeFileSync(DB, JSON.stringify(STATE.users, null, 2));
+}
+
+function saveSessions() {
+  fs.writeFileSync(SESSIONS_DB, JSON.stringify(STATE.sessions, null, 2));
+}
+
+// Password utilities
+function hashPassword(pwd) {
+  return crypto.pbkdf2Sync(pwd, 'salt', 100000, 32, 'sha256').toString('hex');
+}
+
+function verifyPassword(pwd, hash) {
+  return hashPassword(pwd) === hash;
+}
+
+// Session utilities
 function createSession(userId) {
-  const sid = uid();
-  SESS.set(sid, { uid: userId, t: Date.now() });
-  return sid;
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  STATE.sessions[sessionId] = { userId, createdAt: Date.now() };
+  saveSessions();
+  return sessionId;
 }
 
 function verifySession(sessionId) {
-  const sess = SESS.get(sessionId);
-  if (!sess || Date.now() - sess.t > TTL) {
-    SESS.delete(sessionId);
+  const session = STATE.sessions[sessionId];
+  if (!session) return null;
+  const age = Date.now() - session.createdAt;
+  if (age > 7 * 24 * 60 * 60 * 1000) {
+    delete STATE.sessions[sessionId];
+    saveSessions();
     return null;
   }
-  return sess;
+  return session.userId;
 }
 
-// API Handlers
-async function handleAPI(req, res, pathname, query) {
-  const method = req.method;
-  const sessionId = query.get('sessionId');
-  const apiKey = query.get('apiKey');
+// HTTP Server
+const server = http.createServer(async (req, res) => {
+  const { pathname, query } = new URL(req.url, 'http://x');
+  const sessionId = new URL(req.url, 'http://x').searchParams.get('sessionId') ||
+                    (req.headers.cookie || '').match(/sessionId=([^;]+)/)?.[1];
+  const userId = verifySession(sessionId);
 
-  let userId = null;
-
+  // Set CORS & Cookie
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (sessionId) {
-    const sess = verifySession(sessionId);
-    if (!sess) return send(res, 401, { error: 'Invalid session' });
-    userId = sess.uid;
-  } else if (apiKey) {
-    userId = verifyAPIKey(apiKey);
-    if (!userId) return send(res, 401, { error: 'Invalid API key' });
+    res.setHeader('Set-Cookie', `sessionId=${sessionId}; Path=/; HttpOnly; Max-Age=604800`);
   }
 
-  // Health check (public)
-  if (pathname === '/api/health') {
-    return send(res, 200, { ok: true, service: 'dashboard' });
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    res.end();
+    return;
   }
 
-  // Registration
-  if (pathname === '/api/auth/register' && method === 'POST') {
-    if (Object.keys(STATE.users).length > 0 && !Object.keys(STATE.users)[0]) {
-      return send(res, 403, { error: 'Users already exist. Contact admin.' });
+  // Routes
+  try {
+    // Health check
+    if (pathname === '/api/health') {
+      return res.end(JSON.stringify({ status: 'ok' }));
     }
 
-    const body = await readBody(req);
-    const { email, password, name } = JSON.parse(body);
+    // Register
+    if (pathname === '/api/auth/register' && req.method === 'POST') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        try {
+          const { email, name, password } = JSON.parse(body);
+          if (!email || !name || !password) {
+            res.writeHead(400);
+            return res.end(JSON.stringify({ error: 'Missing fields' }));
+          }
+          if (Object.values(STATE.users).find(u => u.email === email)) {
+            res.writeHead(400);
+            return res.end(JSON.stringify({ error: 'Email already exists' }));
+          }
+          const newUser = {
+            id: crypto.randomBytes(16).toString('hex'),
+            email,
+            name,
+            pwHash: hashPassword(password),
+            createdAt: Date.now()
+          };
+          STATE.users[newUser.id] = newUser;
+          saveUsers();
 
-    if (!email || !password || !name) {
-      return send(res, 400, { error: 'Missing fields' });
+          const sid = createSession(newUser.id);
+          res.writeHead(201, { 'Set-Cookie': `sessionId=${sid}; Path=/; HttpOnly; Max-Age=604800` });
+          res.end(JSON.stringify({ ok: true, sessionId: sid, user: { id: newUser.id, email, name } }));
+        } catch(e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
     }
 
-    const user = {
-      id: uid(),
-      email,
-      name,
-      pwHash: hashPassword(password),
-      role: Object.keys(STATE.users).length === 0 ? 'admin' : 'user',
-      createdAt: Date.now()
-    };
+    // Login
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      let body = '';
+      req.on('data', d => body += d);
+      req.on('end', () => {
+        try {
+          const { email, password } = JSON.parse(body);
+          const user = Object.values(STATE.users).find(u => u.email === email && verifyPassword(password, u.pwHash));
+          if (!user) {
+            res.writeHead(401);
+            return res.end(JSON.stringify({ error: 'Invalid credentials' }));
+          }
+          const sid = createSession(user.id);
+          res.writeHead(200, { 'Set-Cookie': `sessionId=${sid}; Path=/; HttpOnly; Max-Age=604800` });
+          res.end(JSON.stringify({ ok: true, sessionId: sid, user: { id: user.id, email: user.email, name: user.name } }));
+        } catch(e) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+      return;
+    }
 
-    STATE.users[user.id] = user;
-    await STORE.write(DB, JSON.stringify(STATE, null, 1));
-
-    const sid = createSession(user.id);
-    return send(res, 201, { ok: true, sessionId: sid, user: { id: user.id, email, name, role: user.role } });
-  }
-
-  // Login
-  if (pathname === '/api/auth/login' && method === 'POST') {
-    const body = await readBody(req);
-    const { email, password } = JSON.parse(body);
-
-    for (const user of Object.values(STATE.users)) {
-      if (user.email === email && verifyPassword(password, user.pwHash)) {
-        const sid = createSession(user.id);
-        return send(res, 200, { ok: true, sessionId: sid, user: { id: user.id, email, name: user.name, role: user.role } });
+    // Protected endpoints require session
+    if (!userId) {
+      if (pathname === '/') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        return res.end(getLoginHTML());
       }
+      res.writeHead(401);
+      return res.end(JSON.stringify({ error: 'Unauthorized' }));
     }
 
-    return send(res, 401, { error: 'Invalid credentials' });
-  }
-
-  // Protected endpoints
-  if (!userId) return send(res, 401, { error: 'Unauthorized' });
-
-  // Generate API key (admin only)
-  if (pathname === '/api/keys/generate' && method === 'POST') {
-    const user = STATE.users[userId];
-    if (user.role !== 'admin') return send(res, 403, { error: 'Admin only' });
-
-    const body = await readBody(req);
-    const { targetUserId } = JSON.parse(body);
-    const key = generateAPIKey(targetUserId || userId);
-
-    await STORE.write(DB, JSON.stringify(STATE, null, 1));
-    return send(res, 200, { ok: true, key, keyId: Object.keys(STATE.apiKeys).find(k => STATE.apiKeys[k].createdAt > Date.now() - 1000) });
-  }
-
-  // List API keys (admin only)
-  if (pathname === '/api/keys' && method === 'GET') {
-    const user = STATE.users[userId];
-    if (user.role !== 'admin') return send(res, 403, { error: 'Admin only' });
-
-    const keys = Object.values(STATE.apiKeys).map(k => ({
-      id: k.id,
-      name: k.name,
-      createdAt: k.createdAt,
-      lastUsed: k.lastUsed
-    }));
-
-    return send(res, 200, { keys });
-  }
-
-  // Proxy to Karan
-  if (pathname.startsWith('/api/karan/')) {
-    const karanPath = pathname.replace('/api/karan', '');
-    try {
-      const body = method !== 'GET' ? await readBody(req) : null;
-      const karanRes = await proxyRequest(KARAN_API, karanPath, method, body, sessionId);
-      return send(res, 200, karanRes);
-    } catch (e) {
-      return send(res, 500, { error: e.message });
+    // Dashboard page
+    if (pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      return res.end(getDashboardHTML());
     }
-  }
 
-  // Proxy to Chairman
-  if (pathname.startsWith('/api/chairman/')) {
-    const chairmanPath = pathname.replace('/api/chairman', '');
-    try {
-      const chairmanRes = await proxyRequest(CHAIRMAN_API, chairmanPath, method);
-      return send(res, 200, chairmanRes);
-    } catch (e) {
-      return send(res, 500, { error: e.message });
+    // Proxy to backends
+    if (pathname.startsWith('/api/karan/')) {
+      const path = pathname.replace('/api/karan', '');
+      const body = req.method !== 'GET' ? await readBody(req) : null;
+      const result = await proxyRequest(KARAN_API, path, req.method, body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(result));
     }
-  }
 
-  // Proxy to Jarvis
-  if (pathname.startsWith('/api/jarvis/')) {
-    const jarvisPath = pathname.replace('/api/jarvis', '');
-    try {
-      const body = method !== 'GET' ? await readBody(req) : null;
-      const jarvisRes = await proxyRequest(JARVIS_API, jarvisPath, method, body);
-      return send(res, 200, jarvisRes);
-    } catch (e) {
-      return send(res, 500, { error: e.message });
+    if (pathname.startsWith('/api/chairman/')) {
+      const path = pathname.replace('/api/chairman', '');
+      const body = req.method !== 'GET' ? await readBody(req) : null;
+      const result = await proxyRequest(CHAIRMAN_API, path, req.method, body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(result));
     }
-  }
 
-  send(res, 404, { error: 'Not found' });
+    if (pathname.startsWith('/api/jarvis/')) {
+      const path = pathname.replace('/api/jarvis', '');
+      const body = req.method !== 'GET' ? await readBody(req) : null;
+      const result = await proxyRequest(JARVIS_API, path, req.method, body);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(result));
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: 'Not found' }));
+  } catch(e) {
+    console.error('[ERROR]', e.message);
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: e.message }));
+  }
+});
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', d => body += d);
+    req.on('end', () => resolve(body));
+  });
 }
 
-async function proxyRequest(baseUrl, path, method, body, sessionId) {
+function proxyRequest(baseUrl, path, method, body) {
   return new Promise((resolve, reject) => {
     const url = new URL(`${baseUrl}${path}`);
-    if (sessionId) url.searchParams.set('sessionId', sessionId);
-
     const proto = url.protocol === 'https:' ? https : http;
     const req = proto.request({
       hostname: url.hostname,
@@ -316,329 +237,73 @@ async function proxyRequest(baseUrl, path, method, body, sessionId) {
         try { resolve(JSON.parse(data)); } catch(e) { resolve(data); }
       });
     });
-
     req.on('error', reject);
     if (body) req.write(body);
     req.end();
   });
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => resolve(body));
-    req.on('error', reject);
-  });
-}
-
-function send(res, code, data) {
-  res.writeHead(code, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data));
-}
-
-// WebSocket upgrade
-function upgradeToWebSocket(req, socket, head) {
-  const url_obj = new URL(req.url, 'http://x');
-  const sessionId = url_obj.searchParams.get('sessionId');
-  const sess = verifySession(sessionId);
-
-  if (!sess) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-    socket.destroy();
-    return;
-  }
-
-  const key = req.headers['sec-websocket-key'];
-  const hash = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-
-  const response = 'HTTP/1.1 101 Switching Protocols\r\n' +
-    'Upgrade: websocket\r\n' +
-    'Connection: Upgrade\r\n' +
-    `Sec-WebSocket-Accept: ${hash}\r\n\r\n`;
-
-  socket.write(response);
-
-  const ws = { socket, isAlive: true, sessionId, userId: sess.uid };
-  WS_CLIENTS.set(socket, ws);
-
-  socket.on('error', (err) => console.error('WebSocket error:', err.message));
-  socket.on('close', () => WS_CLIENTS.delete(socket));
-}
-
-function broadcastEvent(channel, data) {
-  const msg = JSON.stringify({ channel, data, timestamp: Date.now() });
-  const frame = createWebSocketFrame(msg);
-
-  for (const [socket, ws] of WS_CLIENTS) {
-    try { socket.write(frame); } catch (e) {}
-  }
-}
-
-function createWebSocketFrame(data) {
-  const payload = Buffer.from(data);
-  let headerSize = 2;
-  if (payload.length >= 126) headerSize += (payload.length < 65536) ? 2 : 8;
-
-  const frame = Buffer.alloc(headerSize + payload.length);
-  frame[0] = 0x81;
-  let offset = 1;
-
-  if (payload.length < 126) {
-    frame[offset] = payload.length;
-    offset = 2;
-  } else if (payload.length < 65536) {
-    frame[offset] = 126;
-    frame.writeUInt16BE(payload.length, offset + 1);
-    offset = 4;
-  } else {
-    frame[offset] = 127;
-    frame.writeBigUInt64BE(BigInt(payload.length), offset + 1);
-    offset = 10;
-  }
-
-  payload.copy(frame, offset);
-  return frame;
-}
-
-// HTTP Server
-const server = http.createServer(async (req, res) => {
-  try {
-    const url = new URL(req.url, 'http://x');
-
-    if (url.pathname.startsWith('/api/')) {
-      return await handleAPI(req, res, url.pathname, url.searchParams);
-    }
-
-    // Serve HTML dashboard
-    res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-    res.end(getIndexHTML());
-  } catch (e) {
-    console.error('Error:', e.message);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Internal error' }));
-  }
-});
-
-server.on('upgrade', (req, socket, head) => {
-  if (req.headers.upgrade === 'websocket') {
-    upgradeToWebSocket(req, socket, head);
-  }
-});
-
-// Startup
-(async function init() {
-  console.log('\n════════════════════════════════════════════════════════');
-  console.log('   KARAN DASHBOARD - Unified AI Operating System');
-  console.log('════════════════════════════════════════════════════════\n');
-
-  try {
-    const raw = await STORE.read(DB);
-    if (raw) {
-      STATE = JSON.parse(raw);
-    }
-
-    const sraw = await STORE.read(SESSDB);
-    if (sraw) {
-      const now = Date.now();
-      for (const [k, v] of Object.entries(JSON.parse(sraw))) {
-        if (now - v.t < TTL) SESS.set(k, v);
-      }
-    }
-  } catch (e) {
-    console.error('Store init failed:', e.message);
-  }
-
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`   RUNNING ON:  http://localhost:${PORT}`);
-    console.log(`   MODE:        ${PRODUCTION ? 'PRODUCTION' : 'DEVELOPMENT'}`);
-    console.log(`   STORE:       ${STORE.describe()}`);
-    console.log('\n   Services:');
-    console.log(`     • Karan API: ${KARAN_API}`);
-    console.log(`     • Chairman: ${CHAIRMAN_API}`);
-    console.log(`     • Jarvis: ${JARVIS_API}`);
-    console.log('\n   Features:');
-    console.log(`     • Multi-user auth ✓`);
-    console.log(`     • API key management ✓`);
-    console.log(`     • Real-time WebSocket ✓`);
-    console.log(`     • Service orchestration ✓`);
-    console.log('\n════════════════════════════════════════════════════════\n');
-  });
-})();
-
-process.on('SIGTERM', () => {
-  console.log('[shutdown] Karan Dashboard shutting down...');
-  setTimeout(() => process.exit(0), 1500);
-});
-
-// HTML Dashboard (ChatGPT/Claude.com style)
-function getIndexHTML() {
+function getLoginHTML() {
   return `<!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Karan Dashboard</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fff; color: #333; height: 100vh; display: flex; overflow: hidden; }
-
-    .sidebar { width: 300px; background: #f7f7f7; border-right: 1px solid #e5e5e5; display: flex; flex-direction: column; }
-    .sidebar-header { padding: 20px; border-bottom: 1px solid #e5e5e5; }
-    .sidebar-header h1 { font-size: 20px; color: #000; }
-    .sidebar-new { width: 100%; padding: 10px 20px; margin: 10px 0; background: #10a37f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
-    .sidebar-new:hover { background: #1a8f6f; }
-
-    .sidebar-chats { flex: 1; overflow-y: auto; padding: 10px; }
-    .chat-item { padding: 12px; margin-bottom: 8px; background: white; border: 1px solid #e5e5e5; border-radius: 6px; cursor: pointer; font-size: 14px; transition: 0.2s; }
-    .chat-item:hover { background: #f0f0f0; }
-    .chat-item.active { background: #10a37f; color: white; }
-
-    .sidebar-footer { padding: 15px; border-top: 1px solid #e5e5e5; }
-    .user-info { font-size: 13px; color: #666; margin-bottom: 10px; }
-    .logout-btn { width: 100%; padding: 8px; background: #e5e5e5; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-
-    .main { flex: 1; display: flex; flex-direction: column; background: white; }
-    .header { padding: 20px; border-bottom: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; }
-    .header-title { font-size: 18px; font-weight: 600; }
-    .header-actions { display: flex; gap: 10px; }
-    .header-btn { padding: 8px 16px; background: #f0f0f0; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-
-    .content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
-    .messages { flex: 1; margin-bottom: 20px; }
-    .message { margin-bottom: 16px; padding: 12px 16px; border-radius: 8px; max-width: 80%; }
-    .message.user { align-self: flex-end; background: #10a37f; color: white; }
-    .message.assistant { align-self: flex-start; background: #f0f0f0; color: #333; }
-    .message.system { align-self: center; background: #e5e5e5; color: #666; font-size: 12px; max-width: 100%; }
-
-    .input-area { display: flex; gap: 10px; }
-    .input-area input { flex: 1; padding: 12px; border: 1px solid #e5e5e5; border-radius: 6px; font-size: 14px; }
-    .input-area input:focus { outline: none; border-color: #10a37f; }
-    .input-area button { padding: 12px 20px; background: #10a37f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; }
-    .input-area button:hover { background: #1a8f6f; }
-
-    .panel { width: 280px; border-left: 1px solid #e5e5e5; padding: 20px; overflow-y: auto; }
-    .panel-title { font-size: 14px; font-weight: 600; margin-bottom: 15px; }
-    .panel-item { padding: 10px; background: #f7f7f7; margin-bottom: 10px; border-radius: 4px; font-size: 13px; }
-
-    .auth-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z: 1000; }
-    .auth-modal.hidden { display: none; }
-    .auth-box { background: white; padding: 40px; border-radius: 12px; width: 90%; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-    .auth-box h2 { margin-bottom: 20px; }
-    .auth-box label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 500; }
-    .auth-box input { width: 100%; padding: 10px; border: 1px solid #e5e5e5; border-radius: 4px; margin-bottom: 16px; font-size: 14px; }
-    .auth-box input:focus { outline: none; border-color: #10a37f; }
-    .auth-box button { width: 100%; padding: 10px; background: #10a37f; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; margin-bottom: 10px; }
-    .auth-toggle { text-align: center; font-size: 13px; color: #666; }
-    .auth-toggle a { color: #10a37f; cursor: pointer; text-decoration: underline; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; }
+    .auth-box { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+    .auth-box h1 { margin-top: 0; text-align: center; color: #333; }
+    .tabs { display: flex; margin-bottom: 20px; border-bottom: 1px solid #e5e5e5; }
+    .tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; border-bottom: 2px solid transparent; color: #666; }
+    .tab.active { border-bottom-color: #10a37f; color: #10a37f; font-weight: 600; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #e5e5e5; border-radius: 4px; box-sizing: border-box; font-size: 14px; }
+    input:focus { outline: none; border-color: #10a37f; }
+    button { width: 100%; padding: 12px; background: #10a37f; color: white; border: none; border-radius: 4px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+    button:hover { background: #0a8f6f; }
+    .error { color: red; font-size: 13px; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <!-- Auth Modal -->
-  <div id="auth-modal" class="auth-modal">
-    <div class="auth-box">
-      <h2 id="auth-title">Login to Karan Dashboard</h2>
-      <div id="login-form">
-        <label>Email</label>
-        <input type="email" id="login-email" placeholder="your@email.com">
-        <label>Password</label>
-        <input type="password" id="login-password" placeholder="password">
-        <button onclick="handleLogin()">Login</button>
-        <div class="auth-toggle">
-          New user? <a onclick="switchToRegister()">Create account</a>
-        </div>
-      </div>
-      <div id="register-form" style="display:none;">
-        <label>Email</label>
-        <input type="email" id="register-email" placeholder="your@email.com">
-        <label>Full Name</label>
-        <input type="text" id="register-name" placeholder="Your Name">
-        <label>Password</label>
-        <input type="password" id="register-password" placeholder="strong password">
-        <button onclick="handleRegister()">Create Account</button>
-        <div class="auth-toggle">
-          Have an account? <a onclick="switchToLogin()">Login</a>
-        </div>
-      </div>
-    </div>
-  </div>
+  <div class="auth-box">
+    <h1>🚀 FORGE</h1>
 
-  <!-- Main UI -->
-  <div class="sidebar">
-    <div class="sidebar-header">
-      <h1>⚡ Karan</h1>
-      <button class="sidebar-new" onclick="newChat()">+ New Chat</button>
+    <div class="tabs">
+      <div class="tab active" onclick="showTab('login')">Login</div>
+      <div class="tab" onclick="showTab('register')">Register</div>
     </div>
-    <div class="sidebar-chats" id="chat-list"></div>
-    <div class="sidebar-footer">
-      <div class="user-info" id="user-info">Loading...</div>
-      <button class="logout-btn" onclick="logout()">Logout</button>
-    </div>
-  </div>
 
-  <div class="main">
-    <div class="header">
-      <div class="header-title" id="chat-title">Start a new chat</div>
-      <div class="header-actions">
-        <button class="header-btn" onclick="showSettings()">⚙️ Settings</button>
-      </div>
+    <div id="login" class="tab-content active">
+      <input type="email" id="login-email" placeholder="Email" />
+      <input type="password" id="login-password" placeholder="Password" />
+      <button onclick="handleLogin()">Login</button>
+      <div id="login-error" class="error"></div>
     </div>
-    <div class="content">
-      <div class="messages" id="messages"></div>
-      <div class="input-area">
-        <input type="text" id="message-input" placeholder="Message Karan, Chairman, or Jarvis..." onkeypress="if(event.key==='Enter') sendMessage()">
-        <button onclick="sendMessage()">→</button>
-      </div>
-    </div>
-  </div>
 
-  <div class="panel">
-    <div class="panel-title">📊 Services</div>
-    <div class="panel-item">Chairman: <span id="chairman-status">●</span></div>
-    <div class="panel-item">Karan: <span id="karan-status">●</span></div>
-    <div class="panel-item">Jarvis: <span id="jarvis-status">●</span></div>
-    <div class="panel-title" style="margin-top: 20px;">📋 Tasks</div>
-    <div id="tasks-list"></div>
-    <div class="panel-title" style="margin-top: 20px;">🎤 Voice</div>
-    <button class="header-btn" style="width: 100%;" onclick="startVoice()">Start Voice Command</button>
+    <div id="register" class="tab-content">
+      <input type="email" id="register-email" placeholder="Email" />
+      <input type="text" id="register-name" placeholder="Name" />
+      <input type="password" id="register-password" placeholder="Password" />
+      <button onclick="handleRegister()">Register</button>
+      <div id="register-error" class="error"></div>
+    </div>
   </div>
 
   <script>
-    let sessionId = localStorage.getItem('sessionId');
-    const authModal = document.getElementById('auth-modal');
-    const messagesDiv = document.getElementById('messages');
-
-    async function api(path, method = 'GET', data = null) {
-      const opts = { method, headers: { 'Content-Type': 'application/json' } };
-      if (data) opts.body = JSON.stringify(data);
-      const res = await fetch(\`/api\${path}?sessionId=\${sessionId}\`, opts);
-      return res.json();
-    }
-
-    function showAuthModal() {
-      authModal.classList.remove('hidden');
-    }
-
-    function hideAuthModal() {
-      authModal.classList.add('hidden');
-    }
-
-    function switchToLogin() {
-      document.getElementById('login-form').style.display = 'block';
-      document.getElementById('register-form').style.display = 'none';
-      document.getElementById('auth-title').textContent = 'Login to Karan Dashboard';
-    }
-
-    function switchToRegister() {
-      document.getElementById('login-form').style.display = 'none';
-      document.getElementById('register-form').style.display = 'block';
-      document.getElementById('auth-title').textContent = 'Create Your Account';
+    function showTab(name) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+      document.getElementById(name).classList.add('active');
+      document.querySelector('[onclick="showTab(\'' + name + '\')"]').classList.add('active');
     }
 
     async function handleLogin() {
       const email = document.getElementById('login-email').value.trim();
       const password = document.getElementById('login-password').value;
       if (!email || !password) { alert('Please fill all fields'); return; }
+
       try {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
@@ -647,15 +312,13 @@ function getIndexHTML() {
         });
         const data = await res.json();
         if (data.ok) {
-          sessionId = data.sessionId;
-          localStorage.setItem('sessionId', sessionId);
-          hideAuthModal();
-          location.reload();
+          localStorage.setItem('sessionId', data.sessionId);
+          location.href = '/';
         } else {
-          alert('Login failed: ' + data.error);
+          document.getElementById('login-error').textContent = data.error;
         }
-      } catch (e) {
-        alert('Error: ' + e.message);
+      } catch(e) {
+        document.getElementById('login-error').textContent = 'Error: ' + e.message;
       }
     }
 
@@ -664,6 +327,7 @@ function getIndexHTML() {
       const name = document.getElementById('register-name').value.trim();
       const password = document.getElementById('register-password').value;
       if (!email || !name || !password) { alert('Please fill all fields'); return; }
+
       try {
         const res = await fetch('/api/auth/register', {
           method: 'POST',
@@ -672,77 +336,182 @@ function getIndexHTML() {
         });
         const data = await res.json();
         if (data.ok) {
-          sessionId = data.sessionId;
-          localStorage.setItem('sessionId', sessionId);
-          hideAuthModal();
-          location.reload();
+          localStorage.setItem('sessionId', data.sessionId);
+          location.href = '/';
         } else {
-          alert('Registration failed: ' + data.error);
+          document.getElementById('register-error').textContent = data.error;
         }
-      } catch (e) {
-        alert('Error: ' + e.message);
+      } catch(e) {
+        document.getElementById('register-error').textContent = 'Error: ' + e.message;
       }
     }
 
-    async function sendMessage() {
-      const input = document.getElementById('message-input');
-      const text = input.value.trim();
-      if (!text) return;
-
-      const msgDiv = document.createElement('div');
-      msgDiv.className = 'message user';
-      msgDiv.textContent = text;
-      messagesDiv.appendChild(msgDiv);
-      messagesDiv.scrollTop = messagesDiv.scrollHeight;
-      input.value = '';
-
-      try {
-        const data = await api('/karan/chat', 'POST', { message: text });
-        const respDiv = document.createElement('div');
-        respDiv.className = 'message assistant';
-        respDiv.textContent = data.message?.text || data.response || 'Processing...';
-        messagesDiv.appendChild(respDiv);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-      } catch (e) {
-        const errDiv = document.createElement('div');
-        errDiv.className = 'message system';
-        errDiv.textContent = 'Error: ' + e.message;
-        messagesDiv.appendChild(errDiv);
-      }
-    }
-
-    function newChat() {
-      messagesDiv.innerHTML = '';
-      document.getElementById('message-input').focus();
-    }
-
-    function logout() {
-      localStorage.removeItem('sessionId');
-      location.reload();
-    }
-
-    function showSettings() {
-      alert('Settings panel coming soon');
-    }
-
-    function startVoice() {
-      alert('Voice integration coming soon');
-    }
-
-    (async () => {
-      if (!sessionId) {
-        showAuthModal();
-        return;
-      }
-      try {
-        const data = await api('/health');
-        if (!data.ok) location.reload();
-        document.getElementById('user-info').textContent = 'Logged in';
-      } catch (e) {
-        console.error('Init failed:', e);
-      }
-    })();
+    // Check if logged in
+    const sessionId = localStorage.getItem('sessionId');
+    if (sessionId) location.href = '/';
   </script>
 </body>
 </html>`;
 }
+
+function getDashboardHTML() {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <title>FORGE Dashboard</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fff; color: #333; }
+    .container { display: flex; height: 100vh; }
+    .sidebar { width: 250px; background: #f7f7f7; border-right: 1px solid #e5e5e5; padding: 20px; overflow-y: auto; }
+    .sidebar h2 { margin-bottom: 20px; font-size: 16px; }
+    .nav-item { padding: 10px; margin-bottom: 5px; background: white; border: 1px solid #e5e5e5; border-radius: 4px; cursor: pointer; }
+    .nav-item:hover { background: #f0f0f0; }
+    .nav-item.active { background: #10a37f; color: white; }
+    .main { flex: 1; display: flex; flex-direction: column; }
+    .header { padding: 20px; border-bottom: 1px solid #e5e5e5; display: flex; justify-content: space-between; }
+    .content { flex: 1; overflow-y: auto; padding: 20px; }
+    .panel { background: white; padding: 20px; border: 1px solid #e5e5e5; border-radius: 8px; margin-bottom: 20px; }
+    .panel h3 { margin-bottom: 15px; font-size: 16px; }
+    .status { padding: 15px; background: #f0f0f0; border-radius: 4px; margin-bottom: 10px; font-size: 14px; }
+    .status.ok { background: #d4edda; color: #155724; }
+    .status.error { background: #f8d7da; color: #721c24; }
+    button { padding: 10px 20px; background: #10a37f; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #0a8f6f; }
+    .logout-btn { position: absolute; top: 20px; right: 20px; background: #e5e5e5; color: #333; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="sidebar">
+      <h2>🚀 FORGE</h2>
+      <div class="nav-item active" onclick="showSection('dashboard')">Dashboard</div>
+      <div class="nav-item" onclick="showSection('chat')">💬 Chat (Karan)</div>
+      <div class="nav-item" onclick="showSection('monitoring')">📊 Monitor (Chairman)</div>
+      <div class="nav-item" onclick="showSection('voice')">🎤 Voice (Jarvis)</div>
+    </div>
+
+    <div class="main">
+      <div class="header">
+        <h1>FORGE Dashboard</h1>
+        <button class="logout-btn" onclick="logout()">Logout</button>
+      </div>
+
+      <div class="content">
+        <div id="dashboard" class="section">
+          <div class="panel">
+            <h3>System Status</h3>
+            <div id="status-karan" class="status">Karan (Chat)...</div>
+            <div id="status-chairman" class="status">Chairman (Monitor)...</div>
+            <div id="status-jarvis" class="status">Jarvis (Voice)...</div>
+          </div>
+        </div>
+
+        <div id="chat" class="section" style="display:none;">
+          <div class="panel">
+            <h3>Chat with Karan</h3>
+            <div id="chat-messages" style="height: 300px; overflow-y: auto; background: #f7f7f7; padding: 10px; margin-bottom: 10px; border-radius: 4px;"></div>
+            <input type="text" id="chat-input" placeholder="Type a message..." />
+            <button onclick="sendMessage()">Send</button>
+          </div>
+        </div>
+
+        <div id="monitoring" class="section" style="display:none;">
+          <div class="panel">
+            <h3>System Monitoring</h3>
+            <p>Real-time monitoring from Chairman Agent OS</p>
+            <button onclick="loadMonitoring()">Load Monitoring Data</button>
+          </div>
+        </div>
+
+        <div id="voice" class="section" style="display:none;">
+          <div class="panel">
+            <h3>Voice AI (Jarvis)</h3>
+            <p>Voice integration with Project Jarvis</p>
+            <button onclick="startVoice()">Start Voice</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const sessionId = localStorage.getItem('sessionId');
+    if (!sessionId) location.href = '/';
+
+    function showSection(name) {
+      document.querySelectorAll('.section').forEach(el => el.style.display = 'none');
+      document.getElementById(name).style.display = 'block';
+      document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+      event.target.classList.add('active');
+    }
+
+    function logout() {
+      localStorage.removeItem('sessionId');
+      location.href = '/';
+    }
+
+    async function checkStatus() {
+      const endpoints = [
+        { name: 'karan', url: '${KARAN_API}/api/health' },
+        { name: 'chairman', url: '${CHAIRMAN_API}/api/health' },
+        { name: 'jarvis', url: '${JARVIS_API}/api/health' }
+      ];
+
+      for (const ep of endpoints) {
+        try {
+          const res = await fetch(ep.url);
+          const data = await res.json();
+          const el = document.getElementById('status-' + ep.name);
+          el.textContent = ep.name.charAt(0).toUpperCase() + ep.name.slice(1) + ' ✅ Online';
+          el.classList.add('ok');
+        } catch(e) {
+          const el = document.getElementById('status-' + ep.name);
+          el.textContent = ep.name.charAt(0).toUpperCase() + ep.name.slice(1) + ' ❌ Offline';
+          el.classList.add('error');
+        }
+      }
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+
+      const msgDiv = document.createElement('div');
+      msgDiv.style.cssText = 'padding: 8px; margin: 5px 0; background: white; border-radius: 4px;';
+      msgDiv.textContent = 'You: ' + text;
+      document.getElementById('chat-messages').appendChild(msgDiv);
+    }
+
+    function loadMonitoring() {
+      alert('Monitoring data loading from Chairman...');
+    }
+
+    function startVoice() {
+      alert('Voice interface starting with Jarvis...');
+    }
+
+    checkStatus();
+    setInterval(checkStatus, 30000);
+  </script>
+</body>
+</html>`;
+}
+
+loadState();
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 FORGE Dashboard running on http://localhost:${PORT}\n`);
+  console.log(`   Karan API: ${KARAN_API}`);
+  console.log(`   Chairman API: ${CHAIRMAN_API}`);
+  console.log(`   Jarvis API: ${JARVIS_API}\n`);
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n[shutdown] Dashboard shutting down...');
+  server.close(() => process.exit(0));
+});
