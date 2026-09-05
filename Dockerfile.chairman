@@ -1,0 +1,27 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* ./
+
+# Install dependencies
+RUN npm install --production || npm install || true
+
+# Copy Chairman service
+COPY chairman-enhanced.js .
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:8080/api/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+
+# Environment
+ENV NODE_ENV=production \
+    PORT=8080 \
+    PRODUCTION=1
+
+# Run Chairman
+CMD ["node", "chairman-enhanced.js"]
