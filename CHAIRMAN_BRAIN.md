@@ -10,15 +10,16 @@ spinning. It never invents an answer.
 
 ## Set the keys
 
-Both providers have a free tier. Set one and the chat works; set both and it
-fails over automatically when the first one's daily limit is spent.
+Set one and the chat works. Set more than one and it fails over automatically
+when the first one's limit is spent.
 
 Render dashboard → `karan-dashboard` → Environment → Environment Variables:
 
-| Variable | Where to get it | Needed |
+| Variable | Where to get it | Cost |
 |---|---|---|
-| `GEMINI_API_KEY` | aistudio.google.com → Get API key | one of the two |
-| `GROQ_API_KEY` | console.groq.com → API Keys | one of the two |
+| `GEMINI_API_KEY` | aistudio.google.com → Get API key | free tier |
+| `GROQ_API_KEY` | console.groq.com → API Keys | free tier |
+| `OPENAI_API_KEY` | platform.openai.com → API keys | paid per message |
 
 Type them straight into Render. Do not put them in a file in this repository —
 it is public, and a committed key is a leaked key.
@@ -27,10 +28,37 @@ Optional, only if you need them:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `LLM_ORDER` | `gemini,groq` | Who is asked first |
+| `LLM_ORDER` | `gemini,groq,openai` | Who is asked first |
 | `GEMINI_MODEL` | `gemini-2.0-flash` | Model names change; override without a code change |
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` | Same |
+| `OPENAI_MODEL` | **none** | Required with `OPENAI_API_KEY`. See below. |
 | `LLM_TIMEOUT_MS` | `45000` | How long to wait for one provider |
+
+## Using OpenAI
+
+`OPENAI_MODEL` has no default on purpose. OpenAI's line-up changes, and a model
+id guessed in code would fail with a confusing 404 instead of saying plainly
+that nothing was chosen. Put in the exact id your account has access to, copied
+from platform.openai.com. If the id is wrong, OpenAI's own error message is
+shown to you rather than being swallowed.
+
+Some newer OpenAI models are served only by the Responses API and refuse the
+chat endpoint. The chain notices that refusal and retries on the right endpoint
+by itself, so a model released after this code was written still works without
+a code change.
+
+**OpenAI is asked last by default, because it charges per message.** The two
+free tiers are tried first, and it answers only when both are spent or absent.
+That is the free-first rule holding. If you want OpenAI answering first, that is
+your call to make deliberately:
+
+```
+LLM_ORDER=openai,gemini,groq
+```
+
+Set that and every message costs money, including the second call the Chairman
+makes after you approve a web fetch, and every sub-agent in a scout run. A
+single scout run is roughly six calls.
 
 ## What failover actually does
 

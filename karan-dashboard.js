@@ -1084,7 +1084,8 @@ ${bgScript()}
     var list = brain.providers || [];
     if (!list.length) {
       hint.textContent = 'No model key is set, so the Chairman cannot answer yet. '
-        + 'Set GEMINI_API_KEY or GROQ_API_KEY in the service environment.';
+        + 'Set GEMINI_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY with OPENAI_MODEL '
+        + 'in the service environment.';
       if (send) send.disabled = true;
       return;
     }
