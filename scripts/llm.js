@@ -14,11 +14,18 @@
  * committed:
  *   GEMINI_API_KEY   Google AI Studio    (free tier)
  *   GROQ_API_KEY     Groq                (free tier)
+ *   OPENAI_API_KEY   OpenAI              (paid per message)
  *   GEMINI_MODEL     default gemini-2.0-flash
  *   GROQ_MODEL       default llama-3.3-70b-versatile
- *   LLM_ORDER        comma-separated preference, default "gemini,groq"
+ *   OPENAI_MODEL     no default; set the exact model id your account has
+ *   LLM_ORDER        comma-separated preference, default "gemini,groq,openai"
  *
- * Model names change; both are overridable without touching this file.
+ * Model names change constantly, so every one is overridable without touching
+ * this file. OpenAI has no default at all: a guessed model id would fail with a
+ * confusing 404 instead of saying plainly that nothing was chosen.
+ *
+ * The default order puts the free tiers first because OpenAI charges per
+ * message. Set LLM_ORDER to change that deliberately.
  *
  * GEMINI_BASE_URL and GROQ_BASE_URL override the host. They exist so the test
  * suite can point the real chain at a local server and watch it fail over for
@@ -118,11 +125,84 @@ const PROVIDERS = {
       if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
       return { ok: true, text: text.trim(), model };
     }
+  },
+
+  openai: {
+    label: 'OpenAI',
+    key: () => process.env.OPENAI_API_KEY || '',
+    async ask(prompt, system) {
+      // No default. OpenAI's line-up moves, and a model id guessed here would
+      // fail with a confusing 404 rather than saying what is actually wrong.
+      const model = process.env.OPENAI_MODEL || '';
+      if (!model) {
+        return {
+          ok: false,
+          status: 0,
+          error: 'OPENAI_MODEL is not set. Put the exact model id your account '
+            + 'has access to in that variable.'
+        };
+      }
+      const base = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
+      const auth = { Authorization: 'Bearer ' + this.key() };
+
+      const messages = [];
+      if (system) messages.push({ role: 'system', content: system });
+      messages.push({ role: 'user', content: prompt });
+
+      let res = await post(base + '/v1/chat/completions', auth, { model, messages });
+
+      // Newer OpenAI models are served only by the Responses API, and say so
+      // rather than answering. Follow that instruction instead of reporting a
+      // dead end, so a model this code has never heard of still works.
+      if (res.status !== 200 && wantsResponsesApi(res)) {
+        const body = { model, input: prompt };
+        if (system) body.instructions = system;
+        const alt = await post(base + '/v1/responses', auth, body);
+        if (alt.status === 200) {
+          const text = responsesText(alt.body);
+          if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
+          return { ok: true, text, model };
+        }
+        res = alt;
+      }
+
+      if (res.status !== 200) {
+        const msg = (res.body && res.body.error && res.body.error.message) || ('HTTP ' + res.status);
+        return { ok: false, status: res.status, error: msg };
+      }
+      const text = res.body && res.body.choices && res.body.choices[0]
+        && res.body.choices[0].message && res.body.choices[0].message.content;
+      if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
+      return { ok: true, text: text.trim(), model };
+    }
   }
 };
 
+function wantsResponsesApi(res) {
+  if (res.status !== 400 && res.status !== 404) return false;
+  const msg = (res.body && res.body.error && res.body.error.message) || '';
+  return /v1\/responses|Responses API|not supported in the v1\/chat\/completions/i.test(msg);
+}
+
+/** Pull the assistant text out of a Responses API reply, whatever its shape. */
+function responsesText(body) {
+  if (!body) return '';
+  if (typeof body.output_text === 'string' && body.output_text.trim()) {
+    return body.output_text.trim();
+  }
+  const parts = [];
+  (body.output || []).forEach(item => {
+    (item.content || []).forEach(c => {
+      if (typeof c.text === 'string') parts.push(c.text);
+    });
+  });
+  return parts.join('').trim();
+}
+
 function order() {
-  return (process.env.LLM_ORDER || 'gemini,groq')
+  // Free tiers first. A paid provider is a real cost per message, so it is the
+  // last resort unless LLM_ORDER deliberately puts it first.
+  return (process.env.LLM_ORDER || 'gemini,groq,openai')
     .split(',').map(s => s.trim().toLowerCase()).filter(n => PROVIDERS[n]);
 }
 
@@ -144,7 +224,8 @@ async function ask(prompt, system) {
     return {
       ok: false,
       tried,
-      error: 'No LLM provider is configured. Set GEMINI_API_KEY or GROQ_API_KEY.'
+      error: 'No LLM provider is configured. Set GEMINI_API_KEY, GROQ_API_KEY, '
+        + 'or OPENAI_API_KEY with OPENAI_MODEL.'
     };
   }
 

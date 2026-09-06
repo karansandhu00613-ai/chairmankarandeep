@@ -150,7 +150,7 @@ async function run() {
       const cookie = await login(dash.port);
       const res = await request(dash.port, 'POST', '/api/chat', { message: 'hello' }, cookie);
       check(res.status === 502, 'expected 502, got ' + res.status);
-      check(/GEMINI_API_KEY|GROQ_API_KEY/.test(res.body.error || ''),
+      check(/GEMINI_API_KEY|GROQ_API_KEY|OPENAI_API_KEY/.test(res.body.error || ''),
         'error does not name a key to set: ' + res.body.error);
     } finally { await dash.stop(); }
   });

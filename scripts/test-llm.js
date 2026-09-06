@@ -71,8 +71,9 @@ const groqText = t => ({ choices: [{ message: { content: t } }] });
 
 // The module reads process.env at call time, so each case sets its own world
 // and this restores it afterwards. Requiring llm.js fresh is unnecessary.
-const LLM_VARS = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'GEMINI_BASE_URL',
-  'GROQ_BASE_URL', 'LLM_ORDER', 'LLM_TIMEOUT_MS'];
+const LLM_VARS = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY',
+  'GEMINI_BASE_URL', 'GROQ_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_MODEL',
+  'LLM_ORDER', 'LLM_TIMEOUT_MS'];
 
 function withEnv(vars, fn) {
   const saved = {};
@@ -255,6 +256,103 @@ async function run() {
       check(first.role === 'system' && first.content === 'BE STRICT',
         'Groq did not receive the system instruction');
     } finally { await gem.close(); await groq.close(); }
+  });
+
+  // ---- OpenAI, a model this code has never heard of --------------------------
+
+  await test('OpenAI without a model id says so instead of guessing one', async () => {
+    await withEnv({ OPENAI_API_KEY: 'sk-test' }, async () => {
+      const r = await llm.ask('hello');
+      check(r.ok === false, 'answered with no model set');
+      check(/OPENAI_MODEL/.test(r.error), 'error does not name the variable: ' + r.error);
+    });
+  });
+
+  await test('OpenAI answers through the chat endpoint', async () => {
+    const oai = await fakeProvider([[200, { choices: [{ message: { content: 'gpt speaking' } }] }]]);
+    try {
+      await withEnv({
+        OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'some-future-model'
+      }, async () => {
+        const r = await llm.ask('hello', 'BE STRICT');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.text === 'gpt speaking', 'wrong text: ' + r.text);
+        check(r.provider === 'OpenAI', 'wrong provider: ' + r.provider);
+        check(r.model === 'some-future-model', 'did not use the given model: ' + r.model);
+        check(oai.calls[0].url === '/v1/chat/completions', 'wrong endpoint: ' + oai.calls[0].url);
+        check(oai.calls[0].auth === 'Bearer sk-test', 'key not sent');
+      });
+    } finally { await oai.close(); }
+  });
+
+  // A model served only by the Responses API says so. Following that is what
+  // makes a model this code predates work without a code change.
+  await test('A model that requires the Responses API is retried there', async () => {
+    const oai = await fakeProvider([
+      [400, { error: { message: 'This model is not supported in the v1/chat/completions endpoint. Use v1/responses.' } }],
+      [200, { output: [{ content: [{ type: 'output_text', text: 'answered via responses' }] }] }]
+    ]);
+    try {
+      await withEnv({
+        OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'some-future-model'
+      }, async () => {
+        const r = await llm.ask('hello', 'BE STRICT');
+        check(r.ok === true, 'did not retry: ' + r.error);
+        check(r.text === 'answered via responses', 'wrong text: ' + r.text);
+        check(oai.calls.length === 2, 'expected two calls, got ' + oai.calls.length);
+        check(oai.calls[1].url === '/v1/responses', 'wrong retry endpoint: ' + oai.calls[1].url);
+        check(oai.calls[1].body.instructions === 'BE STRICT',
+          'the standing orders were dropped on the retry');
+      });
+    } finally { await oai.close(); }
+  });
+
+  await test('An OpenAI error unrelated to the endpoint is reported, not retried', async () => {
+    const oai = await fakeProvider([[401, { error: { message: 'Incorrect API key provided' } }]]);
+    try {
+      await withEnv({
+        OPENAI_API_KEY: 'sk-wrong', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'm'
+      }, async () => {
+        const r = await llm.ask('hello');
+        check(r.ok === false, 'a bad key reported success');
+        check(/Incorrect API key/.test(r.error), 'lost the reason: ' + r.error);
+        check(oai.calls.length === 1, 'retried a request that would fail the same way');
+      });
+    } finally { await oai.close(); }
+  });
+
+  await test('The free tiers are asked before the paid one by default', async () => {
+    const gem = await fakeProvider([[200, geminiText('free tier answered')]]);
+    const oai = await fakeProvider([[200, { choices: [{ message: { content: 'paid' } }] }]]);
+    try {
+      await withEnv({
+        GEMINI_API_KEY: 'k', GEMINI_BASE_URL: gem.url,
+        OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'm'
+      }, async () => {
+        check(llm.order().join() === 'gemini,groq,openai', 'wrong default order: ' + llm.order());
+        const r = await llm.ask('hello');
+        check(r.provider === 'Gemini', 'went to the paid provider first: ' + r.provider);
+        check(oai.calls.length === 0, 'spent money when a free tier was available');
+      });
+    } finally { await gem.close(); await oai.close(); }
+  });
+
+  await test('A spent free tier falls through to the paid provider', async () => {
+    const gem = await fakeProvider([[429, { error: { message: 'Quota exceeded' } }]]);
+    const groq = await fakeProvider([[429, { error: { message: 'Rate limit reached' } }]]);
+    const oai = await fakeProvider([[200, { choices: [{ message: { content: 'paid backup' } }] }]]);
+    try {
+      await withEnv({
+        GEMINI_API_KEY: 'k', GEMINI_BASE_URL: gem.url,
+        GROQ_API_KEY: 'q', GROQ_BASE_URL: groq.url,
+        OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'm'
+      }, async () => {
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'the chain gave up: ' + r.error);
+        check(r.provider === 'OpenAI', 'wrong final provider: ' + r.provider);
+        check(r.tried.length === 2, 'wrong number of skipped providers: ' + r.tried.length);
+      });
+    } finally { await gem.close(); await groq.close(); await oai.close(); }
   });
 
   console.log('\n📊 ' + passed + ' passed, ' + failed + ' failed\n');
