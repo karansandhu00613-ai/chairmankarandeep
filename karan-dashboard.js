@@ -261,7 +261,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(502, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
           error: 'No model key is set, so the sub-agents cannot reason. '
-            + 'Set GEMINI_API_KEY or GROQ_API_KEY.'
+            + 'Set GEMINI_API_KEY, GROQ_API_KEY, or OPENAI_API_KEY with OPENAI_MODEL.'
         }));
       }
 
