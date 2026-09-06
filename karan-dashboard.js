@@ -95,12 +95,12 @@ function getSetupHTML() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         background: #f7f2ee; color: #3d1f2e; margin: 0; padding: 40px; }
-  .box { background: #fff; border: 1px solid rgba(93,46,70,.12); box-shadow: 0 12px 32px rgba(61,31,46,.09);
+         background: #faf4e9; color: #2e1116; margin: 0; padding: 40px; }
+  .box { background: #fff; border: 1px solid rgba(155,27,48,.14); box-shadow: 0 12px 32px rgba(46,17,22,.09);
          padding: 32px; border-radius: 16px; max-width: 620px; margin: 0 auto; }
   h1 { font-size: 20px; margin-bottom: 14px; }
-  p { line-height: 1.7; color: #6b4a58; }
-  code { background: rgba(164,72,95,.10); color: #a4485f; padding: 2px 7px;
+  p { line-height: 1.7; color: #5c3a3f; }
+  code { background: rgba(155,27,48,.10); color: #9b1b30; padding: 2px 7px;
          border-radius: 5px; font-size: 13px; }
   li { margin: 10px 0; line-height: 1.6; }
 </style>
@@ -280,75 +280,78 @@ uniform float u_time;
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
-float noise(vec2 p){
-  vec2 i = floor(p), f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// A thin slab. Seven of them, tumbling on their own clocks, make the field.
+float box(vec3 p, vec3 b){
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-float fbm(vec2 p){
-  float v = 0.0, a = 0.5;
-  for (int i = 0; i < 5; i++){ v += a * noise(p); p *= 2.03; a *= 0.5; }
-  return v;
+float map(vec3 p){
+  float d = 1e9;
+  for (int i = 0; i < 7; i++){
+    float fi = float(i);
+    vec3 q = p - vec3(sin(fi * 2.3 + u_time * 0.13) * 1.9,
+                      cos(fi * 1.9 + u_time * 0.10) * 0.95,
+                      fi * 1.02 - 1.6);
+    q.xz *= rot(u_time * 0.16 + fi);
+    q.xy *= rot(fi * 0.7);
+    d = min(d, box(q, vec3(0.58, 0.045, 0.58)));
+  }
+  return d;
 }
 
-// The surface. Two drifting octaves so the form keeps folding over itself.
-float H(vec2 p){
-  return fbm(p * 0.9 + vec2(u_time * 0.035, u_time * 0.021)) * 1.15
-       + fbm(p * 2.7 - vec2(u_time * 0.017, 0.0)) * 0.16;
-}
-
-vec3 normalAt(vec2 p, float e){
-  float h = H(p);
-  return normalize(vec3(h - H(p + vec2(e, 0.0)), e, h - H(p + vec2(0.0, e))));
+vec3 nrm(vec3 p){
+  vec2 e = vec2(0.0012, 0.0);
+  return normalize(vec3(map(p + e.xyy) - map(p - e.xyy),
+                        map(p + e.yxy) - map(p - e.yxy),
+                        map(p + e.yyx) - map(p - e.yyx)));
 }
 
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
 
-  vec3 ro = vec3(0.0, 1.55, -2.6);
-  vec3 rd = normalize(vec3(uv, 1.35));
+  vec3 ro = vec3(0.0, 0.0, -4.5);
+  vec3 rd = normalize(vec3(uv, 1.6));
 
   float t = 0.0;
   float hit = 0.0;
-  for (int i = 0; i < 78; i++){
+  for (int i = 0; i < 82; i++){
     vec3 p = ro + rd * t;
-    float d = p.y - H(p.xz);
-    if (d < 0.0016 * t){ hit = 1.0; break; }
-    t += d * 0.62;
-    if (t > 22.0) break;
+    float d = map(p);
+    if (d < 0.002){ hit = 1.0; break; }
+    t += d;
+    if (t > 16.0) break;
   }
 
-  vec3 paper = vec3(0.973, 0.953, 0.937);
-  vec3 col   = paper;
+  vec3 ivory = vec3(0.980, 0.957, 0.914);
+  vec3 ruby  = vec3(0.608, 0.106, 0.188);
+  vec3 gold  = vec3(0.910, 0.639, 0.239);
+  vec3 col   = ivory;
 
   if (hit > 0.5){
     vec3 p = ro + rd * t;
-    vec3 n = normalAt(p.xz, 0.014);
+    vec3 n = nrm(p);
 
-    vec3 lightDir = normalize(vec3(-0.55, 0.75, -0.35));
-    float diff = clamp(dot(n, lightDir), 0.0, 1.0);
-    float rim  = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 2.4);
+    float fres = pow(1.0 - abs(dot(n, rd)), 2.2);
+    float diff = clamp(dot(n, normalize(vec3(-0.4, 0.8, -0.5))), 0.0, 1.0);
+    float spec = pow(clamp(dot(reflect(rd, n), normalize(vec3(-0.35, 0.85, -0.4))), 0.0, 1.0), 38.0);
 
-    // Desert Rose, kept pale: clay in the lit faces, burgundy in the folds.
-    vec3 lit   = vec3(0.988, 0.965, 0.949);
-    vec3 shade = vec3(0.780, 0.596, 0.639);
-    vec3 deep  = vec3(0.541, 0.290, 0.400);
+    // Split the refraction so the edges throw gold and the bodies hold ruby.
+    float split = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 glass = mix(ruby, gold, clamp(split * 0.78 + fres * 0.22, 0.0, 1.0));
 
-    col = mix(deep, shade, smoothstep(0.0, 0.45, diff));
-    col = mix(col, lit,   smoothstep(0.35, 1.0, diff));
-    col += rim * vec3(0.16, 0.10, 0.13);
-
-    // Fade into the page so panels always sit on calm ground.
-    col = mix(col, paper, clamp(t / 16.0, 0.0, 1.0));
+    // Deeper bodies so ruby and gold actually read against ivory, with the
+    // edges kept bright so the slabs still look like glass rather than card.
+    col = mix(ivory, glass, 0.62 + fres * 0.34);
+    col *= 0.92 + diff * 0.22;
+    col += spec * 0.55 * mix(vec3(1.0), gold, 0.6);
+    col = mix(col, ivory, clamp(t / 15.0, 0.0, 1.0));
   }
 
-  // Let the surface climb, but keep the headline band calm.
-  float top = smoothstep(0.04, 0.80, gl_FragCoord.y / u_res.y);
-  col = mix(col, paper, top * 0.42);
-
-  // Break up banding on wide flat gradients.
+  // Keep the headline band calm.
+  col = mix(col, ivory, smoothstep(0.20, 0.94, gl_FragCoord.y / u_res.y) * 0.34);
   col += (hash(gl_FragCoord.xy) - 0.5) * 0.006;
 
   gl_FragColor = vec4(col, 1.0);
@@ -432,17 +435,19 @@ void main(){
 function baseStyles() {
   return `
     :root {
-      /* Desert Rose inverted onto paper: the same burgundy, clay and rose,
-         now as ink and accent over a warm light ground. */
-      --bg: #f7f2ee; --paper: #ffffff; --ink: #3d1f2e; --ink-soft: #6b4a58;
-      --muted: #8d7280; --line: rgba(93,46,70,.12);
-      --accent: #a4485f; --accent-lift: #c4697f; --on-accent: #ffffff;
-      --accent-soft: rgba(164,72,95,.10); --clay: #b87d6d; --rose: #d4a5a5;
-      --danger: #c0392b;
+      /* Ruby Velvet, Saffron Gold, Warm Ivory.
+         Gold is decorative only: at 2.1:1 on ivory it fails as body text, so it
+         carries the shader and small marks while ruby carries every label. */
+      --bg: #faf4e9; --paper: #fffdf8; --ink: #2e1116; --ink-soft: #5c3a3f;
+      --muted: #8a6a6a; --line: rgba(155,27,48,.14);
+      --accent: #9b1b30; --accent-lift: #c0304a; --on-accent: #fffdf8;
+      --accent-soft: rgba(155,27,48,.09);
+      --gold: #e8a33d; --gold-soft: rgba(232,163,61,.16); --ivory: #faf4e9;
+      --danger: #b3261e;
       --radius: 18px;
-      --lift-1: 0 1px 2px rgba(61,31,46,.05), 0 4px 12px rgba(61,31,46,.05);
-      --lift-2: 0 2px 4px rgba(61,31,46,.06), 0 12px 32px rgba(61,31,46,.09);
-      --lift-3: 0 8px 20px rgba(61,31,46,.10), 0 28px 64px rgba(61,31,46,.13);
+      --lift-1: 0 1px 2px rgba(46,17,22,.05), 0 4px 12px rgba(46,17,22,.05);
+      --lift-2: 0 2px 4px rgba(46,17,22,.06), 0 12px 32px rgba(46,17,22,.09);
+      --lift-3: 0 8px 20px rgba(46,17,22,.10), 0 28px 64px rgba(46,17,22,.13);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -457,7 +462,7 @@ function baseStyles() {
     #bg {
       position: fixed; inset: 0; z-index: 0; display: block;
       width: 100%; height: 100%; pointer-events: none;
-      background: radial-gradient(120% 90% at 20% 0%, #fdf6f1 0%, #f7f2ee 45%, #f2e9e6 100%);
+      background: radial-gradient(120% 90% at 20% 0%, #fffdf6 0%, #faf4e9 45%, #f5ecdc 100%);
     }
 
     .card {
@@ -611,7 +616,7 @@ ${baseStyles()}
     border: 1px solid transparent; transition: all .2s ease;
   }
   .nav-item:hover { background: var(--accent-soft); color: var(--ink); transform: translateX(4px); }
-  .nav-item.active { background: var(--accent-soft); color: var(--accent); border-color: rgba(164,72,95,.28); font-weight: 600; }
+  .nav-item.active { background: var(--accent-soft); color: var(--accent); border-color: rgba(155,27,48,.28); font-weight: 600; }
   .nav-item .ico { width: 17px; text-align: center; }
 
   main { min-width: 0; }
@@ -642,7 +647,7 @@ ${baseStyles()}
     margin-bottom: 20px; text-wrap: balance;
   }
   .hero h2 .accent {
-    background: linear-gradient(120deg, var(--accent), var(--clay) 55%, var(--accent-lift));
+    background: linear-gradient(120deg, var(--accent), var(--gold) 55%, var(--accent-lift));
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
   .hero p.lead {
@@ -675,22 +680,22 @@ ${baseStyles()}
   }
   .svc { transform-style: preserve-3d; will-change: transform; }
   .svc:hover { box-shadow: var(--lift-2); }
-  .svc.up { border-color: rgba(164,72,95,.22); }
-  .svc.down { border-color: rgba(192,57,43,.45); background: rgba(192,57,43,.05); }
+  .svc.up { border-color: rgba(155,27,48,.22); }
+  .svc.down { border-color: rgba(179,38,30,.45); background: rgba(179,38,30,.05); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
-  .svc.up .dot { background: var(--accent); box-shadow: 0 0 0 0 rgba(164,72,95,.5); animation: ping 2s ease-out infinite; }
+  .svc.up .dot { background: var(--accent); box-shadow: 0 0 0 0 rgba(155,27,48,.5); animation: ping 2s ease-out infinite; }
   /* Offline is signalled by shape, not hue: a hollow ring against the filled,
      pulsing dot of a healthy service. Two pinks in one palette are too close to
      tell apart at a glance, and this stays readable in any theme. */
   .svc.down .dot { background: transparent; border: 2px solid var(--danger); }
   .svc.down .name, .svc.down .sub { opacity: .8; }
-  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(164,72,95,.5); } 70% { box-shadow: 0 0 0 9px rgba(164,72,95,0); } 100% { box-shadow: 0 0 0 0 rgba(164,72,95,0); } }
+  @keyframes ping { 0% { box-shadow: 0 0 0 0 rgba(155,27,48,.5); } 70% { box-shadow: 0 0 0 9px rgba(155,27,48,0); } 100% { box-shadow: 0 0 0 0 rgba(155,27,48,0); } }
   .svc .name { font-weight: 600; font-size: 14px; text-transform: capitalize; }
   .svc .sub { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; margin-top: 2px; }
 
   .log {
     font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; line-height: 1.65;
-    background: #fbf7f4; border: 1px solid var(--line); border-radius: 12px;
+    background: #fdf8ef; border: 1px solid var(--line); border-radius: 12px;
     padding: 15px; max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
     color: var(--ink-soft);
   }
@@ -698,8 +703,8 @@ ${baseStyles()}
   .msg { max-width: 78%; padding: 11px 15px; border-radius: 14px; font-size: 14px; line-height: 1.5; animation: pop .35s cubic-bezier(.2,.8,.2,1); }
   @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
   .msg.me { align-self: flex-end; background: linear-gradient(135deg,var(--accent-lift),var(--accent)); color: var(--on-accent); border-bottom-right-radius: 4px; }
-  .msg.them { align-self: flex-start; background: #fbf7f4; border: 1px solid var(--line); color: var(--ink); border-bottom-left-radius: 4px; box-shadow: var(--lift-1); }
-  .msg.sys { align-self: center; background: rgba(192,57,43,.07); border: 1px solid rgba(192,57,43,.28); color: var(--danger); font-size: 12.5px; }
+  .msg.them { align-self: flex-start; background: #fdf8ef; border: 1px solid var(--line); color: var(--ink); border-bottom-left-radius: 4px; box-shadow: var(--lift-1); }
+  .msg.sys { align-self: center; background: rgba(179,38,30,.07); border: 1px solid rgba(179,38,30,.28); color: var(--danger); font-size: 12.5px; }
   .row { display: flex; gap: 10px; }
   .row input { flex: 1; }
 
