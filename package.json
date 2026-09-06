@@ -8,7 +8,7 @@
     "start": "node chairman-enhanced.js",
     "dev": "NODE_ENV=development node chairman-enhanced.js",
     "prod": "PRODUCTION=1 NODE_ENV=production node chairman-enhanced.js",
-    "test": "node scripts/test-all.js && node scripts/test-integration.js",
+    "test": "node scripts/test-all.js && node scripts/test-integration.js && node scripts/test-llm.js && node scripts/test-chat.js && node scripts/test-agents.js",
     "lint": "node scripts/lint-check.js",
     "verify": "npm run lint && npm run test",
     "watchdog": "node scripts/watchdog.js",

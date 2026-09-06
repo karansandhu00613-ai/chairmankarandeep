@@ -4,6 +4,10 @@
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
+const llm = require('./scripts/llm');
+const chat = require('./scripts/chat');
+const approvals = require('./scripts/approvals');
+const agents = require('./scripts/agents');
 
 const PORT = parseInt(process.env.PORT || '8000');
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
@@ -189,8 +193,117 @@ const server = http.createServer(async (req, res) => {
       const results = await Promise.all([KARAN_API, CHAIRMAN_API, JARVIS_API].map(checkBackend));
       const status = {};
       names.forEach((n, i) => { status[n] = results[i]; });
+      // The chat answers from here, so the page needs to know whether a
+      // provider key is actually set rather than discovering it on send.
+      status.brain = { providers: llm.configured().map(n => llm.PROVIDERS[n].label) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(status));
+    }
+
+    // The Chairman answers here, in this process, through the free provider
+    // chain. It deliberately does not depend on a backend service: those sleep,
+    // and the chat box being dead for the first minute after a quiet spell was
+    // the single thing that made the whole system look broken.
+    if (pathname === '/api/chat' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let message = '';
+      try { message = String(JSON.parse(raw).message || '').trim(); } catch (e) { message = ''; }
+      if (!message) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Empty message' }));
+      }
+
+      const answer = await chat.turn(message);
+      if (!answer.ok) {
+        // Every reason, named. A spent free tier and a wrong key need different
+        // fixes, and a generic failure would hide which one this is.
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: answer.error, tried: answer.tried }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(answer));
+    }
+
+    // The approval queue. Nothing external runs until one of these is approved,
+    // and approving runs it exactly once.
+    if (pathname === '/api/approvals' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        pending: approvals.pending(),
+        history: approvals.history(10)
+      }));
+    }
+
+    const decision = pathname.match(/^\/api\/approvals\/([a-f0-9]+)\/(approve|deny)$/);
+    if (decision && req.method === 'POST') {
+      const [, id, verb] = decision;
+      const out = verb === 'approve' ? await approvals.approve(id) : approvals.deny(id);
+      res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(out));
+    }
+
+    // The business scout. Starting it is Karan pressing the button with the
+    // queries in front of him, which is his approval for this run. What it
+    // produces is a proposal that waits for a separate yes; the scout itself
+    // sets nothing up.
+    if (pathname === '/api/scout' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let queries = [];
+      try {
+        queries = (JSON.parse(raw).queries || [])
+          .map(q => String(q).trim()).filter(Boolean).slice(0, 6);
+      } catch (e) { queries = []; }
+      if (!queries.length) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Give it at least one thing to look for.' }));
+      }
+      if (!llm.configured().length) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          error: 'No model key is set, so the sub-agents cannot reason. '
+            + 'Set GEMINI_API_KEY or GROQ_API_KEY.'
+        }));
+      }
+
+      const run = agents.scout(queries, {
+        onProposal: (proposal, r) => {
+          approvals.request(
+            'venture.setup',
+            'Set up a test for: ' + proposal.problem.split('\n')[0].slice(0, 160),
+            { runId: r.id, ideaId: proposal.id, verdict: proposal.verdict },
+            async () => ({
+              note: 'Approved. The build plan is ready to execute; nothing has been '
+                + 'created or published yet.',
+              plan: proposal.build.text
+            }));
+        }
+      });
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ id: run.id, status: run.status, queries }));
+    }
+
+    const runMatch = pathname.match(/^\/api\/scout\/([a-f0-9]+)$/);
+    if (runMatch && req.method === 'GET') {
+      const run = agents.getRun(runMatch[1]);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'No such run' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // `done` is a promise and the runner functions are not serialisable.
+      return res.end(JSON.stringify({
+        id: run.id, status: run.status, queries: run.queries, steps: run.steps,
+        notes: run.notes, error: run.error, analysis: run.analysis,
+        citations: run.citations, evidenceCount: run.evidence.length,
+        proposals: run.proposals.map(p => ({
+          id: p.id, verdict: p.verdict, problem: p.problem,
+          market: p.market.ok ? p.market.text : p.market.error,
+          build: p.build.ok ? p.build.text : p.build.error,
+          money: p.money.ok ? p.money.text : p.money.error,
+          review: p.review && (p.review.ok ? p.review.text : p.review.error),
+          agents: p.agents
+        }))
+      }));
     }
 
     // Dashboard page
@@ -279,79 +392,62 @@ uniform vec2  u_res;
 uniform float u_time;
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-
-mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
-
-// A thin slab. Seven of them, tumbling on their own clocks, make the field.
-float box(vec3 p, vec3 b){
-  vec3 q = abs(p) - b;
-  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-
-float map(vec3 p){
-  float d = 1e9;
-  for (int i = 0; i < 7; i++){
-    float fi = float(i);
-    vec3 q = p - vec3(sin(fi * 2.3 + u_time * 0.13) * 1.9,
-                      cos(fi * 1.9 + u_time * 0.10) * 0.95,
-                      fi * 1.02 - 1.6);
-    q.xz *= rot(u_time * 0.16 + fi);
-    q.xy *= rot(fi * 0.7);
-    d = min(d, box(q, vec3(0.58, 0.045, 0.58)));
-  }
-  return d;
-}
-
-vec3 nrm(vec3 p){
-  vec2 e = vec2(0.0012, 0.0);
-  return normalize(vec3(map(p + e.xyy) - map(p - e.xyy),
-                        map(p + e.yxy) - map(p - e.yxy),
-                        map(p + e.yyx) - map(p - e.yyx)));
-}
+float hash1(float n){ return fract(sin(n) * 43758.5453); }
 
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
-
-  vec3 ro = vec3(0.0, 0.0, -4.5);
-  vec3 rd = normalize(vec3(uv, 1.6));
-
-  float t = 0.0;
-  float hit = 0.0;
-  for (int i = 0; i < 82; i++){
-    vec3 p = ro + rd * t;
-    float d = map(p);
-    if (d < 0.002){ hit = 1.0; break; }
-    t += d;
-    if (t > 16.0) break;
-  }
 
   vec3 ivory = vec3(0.980, 0.957, 0.914);
   vec3 ruby  = vec3(0.608, 0.106, 0.188);
   vec3 gold  = vec3(0.910, 0.639, 0.239);
   vec3 col   = ivory;
 
-  if (hit > 0.5){
-    vec3 p = ro + rd * t;
-    vec3 n = nrm(p);
+  // Nodes at real depth: a far node is small and pale, a near one large.
+  // Drawn at high opacity in their own colour rather than as a faint wash,
+  // because ruby at low alpha over ivory reads as pink, not ruby.
+  for (int i = 0; i < 48; i++){
+    float fi = float(i);
 
-    float fres = pow(1.0 - abs(dot(n, rd)), 2.2);
-    float diff = clamp(dot(n, normalize(vec3(-0.4, 0.8, -0.5))), 0.0, 1.0);
-    float spec = pow(clamp(dot(reflect(rd, n), normalize(vec3(-0.35, 0.85, -0.4))), 0.0, 1.0), 38.0);
+    float z = fract(fi * 0.371 + u_time * 0.035);
+    float depth = mix(5.5, 0.75, z);
 
-    // Split the refraction so the edges throw gold and the bodies hold ruby.
-    float split = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 glass = mix(ruby, gold, clamp(split * 0.78 + fres * 0.22, 0.0, 1.0));
+    vec2 c = vec2(hash1(fi * 7.3) - 0.5, hash1(fi * 3.1) - 0.5) * 3.6;
+    c += vec2(sin(u_time * 0.21 + fi), cos(u_time * 0.17 + fi * 1.3)) * 0.18;
+    vec2 pp = c / depth;
 
-    // Deeper bodies so ruby and gold actually read against ivory, with the
-    // edges kept bright so the slabs still look like glass rather than card.
-    col = mix(ivory, glass, 0.62 + fres * 0.34);
-    col *= 0.92 + diff * 0.22;
-    col += spec * 0.55 * mix(vec3(1.0), gold, 0.6);
-    col = mix(col, ivory, clamp(t / 15.0, 0.0, 1.0));
+    // Links first, so nodes always sit on top of their own threads.
+    for (int j = 1; j <= 2; j++){
+      float fj = fi + float(j);
+      vec2 c2 = vec2(hash1(fj * 7.3) - 0.5, hash1(fj * 3.1) - 0.5) * 3.6;
+      c2 += vec2(sin(u_time * 0.21 + fj), cos(u_time * 0.17 + fj * 1.3)) * 0.18;
+      vec2 q2 = c2 / depth;
+
+      vec2 ab = q2 - pp;
+      if (length(ab) < 0.42){
+        vec2 ap = uv - pp;
+        float h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-5), 0.0, 1.0);
+        float dl = length(ap - ab * h);
+        float line = smoothstep(0.0032, 0.0, dl) * (1.0 - z * 0.6);
+        col = mix(col, ruby, line * 0.16);
+      }
+    }
+
+    float r = (0.034 / depth) * (1.0 + hash1(fi) * 1.4);
+    float d = length(uv - pp);
+    float node = smoothstep(r, r * 0.28, d);
+
+    // A gold minority so the field is not one flat hue.
+    vec3 tint = hash1(fi * 5.0) > 0.76 ? gold : ruby;
+    float near = 1.0 - z * 0.55;
+    col = mix(col, tint, node * near);
+
+    // A soft halo, kept faint, to give the near nodes some bloom.
+    float halo = smoothstep(r * 4.5, r, d) - node;
+    col = mix(col, tint, clamp(halo, 0.0, 1.0) * 0.09 * near);
   }
 
   // Keep the headline band calm.
-  col = mix(col, ivory, smoothstep(0.20, 0.94, gl_FragCoord.y / u_res.y) * 0.34);
+  col = mix(col, ivory, smoothstep(0.16, 0.98, gl_FragCoord.y / u_res.y) * 0.52);
   col += (hash(gl_FragCoord.xy) - 0.5) * 0.006;
 
   gl_FragColor = vec4(col, 1.0);
@@ -708,6 +804,40 @@ ${baseStyles()}
   .row { display: flex; gap: 10px; }
   .row input { flex: 1; }
 
+  /* Approvals, the scout, and the sub-agent step list. */
+  .badge {
+    display: inline-block; margin-left: 7px; min-width: 18px; padding: 1px 6px;
+    border-radius: 9px; background: var(--accent); color: var(--on-accent);
+    font-size: 11px; font-weight: 700; text-align: center; vertical-align: middle;
+  }
+  /* display:inline-block above would otherwise beat the browser's own rule for
+     the hidden attribute, leaving a "0" badge sitting in the nav. */
+  .badge[hidden] { display: none; }
+  .ask {
+    border: 1px solid rgba(232,163,61,.5); background: var(--gold-soft);
+    border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .ask .what { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+  .ask .meta { font-size: 12px; color: var(--muted); margin-bottom: 11px; word-break: break-all; }
+  .ask .row { justify-content: flex-start; }
+  .ask button { padding: 8px 16px; font-size: 13px; }
+  .ask.settled { border-color: var(--line); background: #fdf8ef; opacity: .85; }
+  .ask.settled .row { display: none; }
+  .verdict {
+    display: inline-block; padding: 2px 9px; border-radius: 8px; font-size: 11px;
+    font-weight: 700; letter-spacing: .04em; border: 1px solid var(--line);
+    background: var(--paper); color: var(--muted);
+  }
+  .steps { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+  .steps .st { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-soft); }
+  .steps .st .pip { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
+  .steps .st.running .pip { background: var(--gold); animation: pulse 1.1s ease-in-out infinite; }
+  .steps .st.done .pip { background: var(--accent); }
+  .steps .st.failed .pip { background: var(--danger); }
+  .steps .st .who { font-weight: 600; color: var(--ink); min-width: 118px; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .steps .st.running .pip { animation: none; } }
+
   @media (max-width: 860px) {
     .shell { grid-template-columns: 1fr; padding: 14px; }
     aside { position: static; }
@@ -727,6 +857,8 @@ ${bgScript()}
     <div class="nav">
       <div class="nav-item active" data-sec="overview"><span class="ico">◈</span><span>Overview</span></div>
       <div class="nav-item" data-sec="chat"><span class="ico">✦</span><span>Chat</span></div>
+      <div class="nav-item" data-sec="approvals"><span class="ico">◆</span><span>Approvals<span id="approval-badge" class="badge" hidden>0</span></span></div>
+      <div class="nav-item" data-sec="scout"><span class="ico">⌖</span><span>Scout</span></div>
       <div class="nav-item" data-sec="monitor"><span class="ico">▤</span><span>Chairman OS</span></div>
       <div class="nav-item" data-sec="voice"><span class="ico">◉</span><span>Voice</span></div>
     </div>
@@ -763,13 +895,42 @@ ${bgScript()}
 
     <section id="chat" class="section">
       <div class="panel card reveal">
-        <h3>Chat</h3>
-        <p class="hint">Talks to the Karan service.</p>
+        <h3>Chairman</h3>
+        <p class="hint" id="brain-hint">Checking which model is answering...</p>
         <div class="chat-log" id="chat-log"></div>
         <div class="row">
           <input id="chat-input" placeholder="Ask something..." autocomplete="off">
           <button id="chat-send" onclick="sendMessage()">Send</button>
         </div>
+      </div>
+    </section>
+
+    <section id="approvals" class="section">
+      <div class="panel card reveal">
+        <h3>Waiting for you</h3>
+        <p class="hint">Nothing here has happened. Each item runs only when you approve
+        it, runs once, and expires if you leave it. There is no approve-all.</p>
+        <div id="approval-list"><p class="hint">Loading...</p></div>
+      </div>
+      <div class="panel card reveal" style="margin-top:18px">
+        <h3>Decided</h3>
+        <div id="approval-history"><p class="hint">Nothing decided yet.</p></div>
+      </div>
+    </section>
+
+    <section id="scout" class="section">
+      <div class="panel card reveal">
+        <h3>Business scout</h3>
+        <p class="hint">Reads public complaints on Hacker News and Reddit, then puts
+        sub-agents on the problems that recur. It proposes; it never sets anything up.
+        Pressing Run is your approval for that run.</p>
+        <div class="row" style="margin-bottom:14px">
+          <input id="scout-queries" autocomplete="off"
+            placeholder="What to look for, comma separated">
+          <button id="scout-run" onclick="runScout()">Run</button>
+        </div>
+        <div id="scout-steps"></div>
+        <div class="log" id="scout-out">Give it a subject and press Run.</div>
       </div>
     </section>
 
@@ -800,7 +961,8 @@ ${bgScript()}
 </div>
 
 <script>
-  var TITLES = { overview: 'Overview', chat: 'Chat', monitor: 'Chairman OS', voice: 'Voice' };
+  var TITLES = { overview: 'Overview', chat: 'Chat', approvals: 'Approvals',
+    scout: 'Scout', monitor: 'Chairman OS', voice: 'Voice' };
   var CHAIRMAN_URL = '${CHAIRMAN_API}';
 
   function goSection(name) {
@@ -868,6 +1030,10 @@ ${bgScript()}
       var res = await fetch('/api/status');
       if (res.status === 401) { location.href = '/'; return; }
       var data = await res.json();
+      // The brain is not a service tile; it decides what the chat box can say.
+      var brain = data.brain || { providers: [] };
+      delete data.brain;
+      showBrain(brain);
       grid.innerHTML = '';
       Object.keys(data).forEach(function (name) {
         var s = data[name];
@@ -909,6 +1075,26 @@ ${bgScript()}
     return el;
   }
 
+  // Says plainly whether the Chairman can answer at all, and on which provider,
+  // instead of letting the first message be the way that is discovered.
+  function showBrain(brain) {
+    var hint = document.getElementById('brain-hint');
+    var send = document.getElementById('chat-send');
+    if (!hint) return;
+    var list = brain.providers || [];
+    if (!list.length) {
+      hint.textContent = 'No model key is set, so the Chairman cannot answer yet. '
+        + 'Set GEMINI_API_KEY or GROQ_API_KEY in the service environment.';
+      if (send) send.disabled = true;
+      return;
+    }
+    hint.textContent = list.length > 1
+      ? 'Answering on ' + list[0] + '. If its free limit is spent it moves to '
+        + list.slice(1).join(', ') + ' automatically.'
+      : 'Answering on ' + list[0] + '. Add a second key for automatic failover.';
+    if (send) send.disabled = false;
+  }
+
   async function sendMessage() {
     var input = document.getElementById('chat-input');
     var send = document.getElementById('chat-send');
@@ -919,20 +1105,17 @@ ${bgScript()}
     input.value = '';
     send.disabled = true;
 
-    // Waking a sleeping backend takes up to a minute, so say so rather than
-    // leaving a dead-looking box.
     var waiting = addMsg('Thinking...', 'them');
     var waitedFor = 0;
     var ticker = setInterval(function () {
       waitedFor += 1;
-      if (waitedFor === 4) waiting.textContent = 'Waking the Karan service, this can take up to a minute...';
-      else if (waitedFor > 4) waiting.textContent = 'Still waking... ' + waitedFor + 's';
+      if (waitedFor > 3) waiting.textContent = 'Thinking... ' + waitedFor + 's';
     }, 1000);
 
     var settle = function () { clearInterval(ticker); waiting.remove(); };
 
     try {
-      var res = await fetch('/api/karan/api/chat', {
+      var res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text })
@@ -940,16 +1123,22 @@ ${bgScript()}
       var data = await res.json().catch(function () { return {}; });
       settle();
       if (!res.ok) {
-        addMsg('Karan service returned ' + res.status + (data.error ? ': ' + data.error : ''), 'sys');
+        addMsg(data.error || ('Chat failed with status ' + res.status), 'sys');
       } else {
-        var m = data.message;
-        var reply = typeof m === 'string' ? m
-          : (m && typeof m.text === 'string' ? m.text : JSON.stringify(data, null, 2));
-        addMsg(reply, 'them');
+        if (data.reply) addMsg(data.reply, 'them');
+        if (data.failedOver && data.failedOver.length) {
+          addMsg(data.failedOver.join(' and ') + ' was unavailable, so '
+            + data.provider + ' answered.', 'sys');
+        }
+        // He wants to go online. Nothing has been fetched yet.
+        if (data.kind === 'approval') {
+          askInChat(data.approval);
+          refreshApprovals();
+        }
       }
     } catch (e) {
       settle();
-      addMsg('Could not reach the Karan service: ' + e.message, 'sys');
+      addMsg('Could not reach the dashboard: ' + e.message, 'sys');
     }
     send.disabled = false;
     input.focus();
@@ -958,6 +1147,188 @@ ${bgScript()}
   document.getElementById('chat-input').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') sendMessage();
   });
+
+  // ---- Approvals -----------------------------------------------------------
+  // Nothing in this section has happened. Each card is an action that will run
+  // only if you press Approve, and only once.
+
+  function askCard(item, inChat) {
+    var el = document.createElement('div');
+    el.className = 'ask';
+    el.id = 'ask-' + item.id;
+
+    var what = document.createElement('div');
+    what.className = 'what';
+    what.textContent = item.summary;
+    el.appendChild(what);
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = item.kind + ' · asked ' + new Date(item.createdAt).toLocaleTimeString();
+    el.appendChild(meta);
+
+    if (item.status === 'pending') {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var yes = document.createElement('button');
+      yes.textContent = 'Approve';
+      var no = document.createElement('button');
+      no.className = 'ghost';
+      no.textContent = 'Deny';
+      yes.onclick = function () { decide(item.id, 'approve', el, inChat); };
+      no.onclick = function () { decide(item.id, 'deny', el, inChat); };
+      row.appendChild(yes);
+      row.appendChild(no);
+      el.appendChild(row);
+    } else {
+      el.className = 'ask settled';
+      meta.textContent += ' · ' + item.status;
+    }
+    return el;
+  }
+
+  function askInChat(item) {
+    var log = document.getElementById('chat-log');
+    log.appendChild(askCard(item, true));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function decide(id, verb, el, inChat) {
+    el.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    var meta = el.querySelector('.meta');
+    meta.textContent = verb === 'approve' ? 'Running...' : 'Denying...';
+    try {
+      var res = await fetch('/api/approvals/' + id + '/' + verb, { method: 'POST' });
+      var data = await res.json().catch(function () { return {}; });
+      el.className = 'ask settled';
+      if (!res.ok || !data.ok) {
+        meta.textContent = data.error || ('Failed with status ' + res.status);
+      } else {
+        meta.textContent = verb === 'approve' ? 'Approved and run.' : 'Denied. Nothing ran.';
+        var r = data.item && data.item.result;
+        if (inChat && verb === 'approve' && r) {
+          if (r.answer) addMsg(r.answer, 'them');
+          if (r.sources && r.sources.length) {
+            addMsg('Sources: ' + r.sources.slice(0, 5).map(function (s) {
+              return s.url; }).join('  '), 'sys');
+          }
+        } else if (inChat && verb === 'deny') {
+          addMsg('Denied, so nothing was fetched and nothing was read.', 'sys');
+        }
+      }
+    } catch (e) {
+      meta.textContent = 'Could not reach the dashboard: ' + e.message;
+    }
+    refreshApprovals();
+  }
+
+  async function refreshApprovals() {
+    var list = document.getElementById('approval-list');
+    var hist = document.getElementById('approval-history');
+    var badge = document.getElementById('approval-badge');
+    try {
+      var res = await fetch('/api/approvals');
+      if (!res.ok) return;
+      var data = await res.json();
+
+      list.innerHTML = '';
+      if (!data.pending.length) {
+        list.innerHTML = '<p class="hint">Nothing is waiting on you.</p>';
+      } else {
+        data.pending.forEach(function (item) { list.appendChild(askCard(item, false)); });
+      }
+      if (badge) {
+        badge.hidden = data.pending.length === 0;
+        badge.textContent = data.pending.length;
+      }
+
+      hist.innerHTML = '';
+      if (!data.history.length) {
+        hist.innerHTML = '<p class="hint">Nothing decided yet.</p>';
+      } else {
+        data.history.forEach(function (item) { hist.appendChild(askCard(item, false)); });
+      }
+    } catch (e) { /* the status poll already reports connectivity */ }
+  }
+  refreshApprovals();
+  setInterval(refreshApprovals, 15000);
+
+  // ---- Business scout ------------------------------------------------------
+
+  var scoutTimer = null;
+
+  async function runScout() {
+    var input = document.getElementById('scout-queries');
+    var btn = document.getElementById('scout-run');
+    var out = document.getElementById('scout-out');
+    var queries = input.value.split(',').map(function (s) { return s.trim(); })
+      .filter(function (s) { return s; });
+    if (!queries.length) { out.textContent = 'Give it at least one subject.'; return; }
+
+    btn.disabled = true;
+    out.textContent = 'Starting...';
+    document.getElementById('scout-steps').innerHTML = '';
+    try {
+      var res = await fetch('/api/scout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queries: queries })
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) { out.textContent = data.error || ('Failed with status ' + res.status); btn.disabled = false; return; }
+      if (scoutTimer) clearInterval(scoutTimer);
+      scoutTimer = setInterval(function () { pollScout(data.id); }, 2000);
+      pollScout(data.id);
+    } catch (e) {
+      out.textContent = 'Could not reach the dashboard: ' + e.message;
+      btn.disabled = false;
+    }
+  }
+
+  async function pollScout(id) {
+    try {
+      var res = await fetch('/api/scout/' + id);
+      if (!res.ok) return;
+      var run = await res.json();
+
+      var steps = document.getElementById('scout-steps');
+      steps.className = 'steps';
+      steps.innerHTML = '';
+      run.steps.forEach(function (s) {
+        var el = document.createElement('div');
+        el.className = 'st ' + s.status;
+        el.innerHTML = '<span class="pip"></span><span class="who"></span><span class="what"></span>';
+        el.querySelector('.who').textContent = s.name;
+        el.querySelector('.what').textContent = s.detail || s.status;
+        steps.appendChild(el);
+      });
+
+      var lines = [];
+      if (run.evidenceCount) lines.push(run.evidenceCount + ' public posts read.');
+      run.notes.forEach(function (n) { lines.push('Note: ' + n); });
+      if (run.error) lines.push('Failed: ' + run.error);
+      if (run.analysis) lines.push('\\n--- What people are actually complaining about ---\\n' + run.analysis);
+      if (run.citations && run.citations.length) {
+        lines.push('\\nSources actually read:');
+        run.citations.forEach(function (c) { lines.push('  [' + c.n + '] ' + c.title + '  ' + c.url); });
+      }
+      run.proposals.forEach(function (p) {
+        lines.push('\\n=== ' + p.id + ' · ' + p.verdict + ' ===');
+        lines.push('\\nMarket:\\n' + p.market);
+        lines.push('\\nSmallest test:\\n' + p.build);
+        lines.push('\\nHow it would earn:\\n' + p.money);
+        if (p.review) lines.push('\\nArgued against:\\n' + p.review);
+      });
+      document.getElementById('scout-out').textContent = lines.join('\\n');
+
+      if (run.status !== 'running') {
+        clearInterval(scoutTimer);
+        scoutTimer = null;
+        document.getElementById('scout-run').disabled = false;
+        refreshApprovals();
+      }
+    } catch (e) { /* keep polling; a transient failure is not the end of the run */ }
+  }
 
   async function loadFeed(target, path) {
     var out = document.getElementById(target);

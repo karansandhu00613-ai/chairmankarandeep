@@ -53,7 +53,15 @@ test('All service files parse', () => {
     'karan-chief-operator.js',
     'chairman-enhanced.js',
     'chairman.js',
-    'jarvis.js'
+    'jarvis.js',
+    // Required by the dashboard at startup, so a syntax error here stops it
+    // booting just as surely as one in the server file itself.
+    'scripts/llm.js',
+    'scripts/chairman-prompt.js',
+    'scripts/web.js',
+    'scripts/approvals.js',
+    'scripts/agents.js',
+    'scripts/chat.js'
   ];
   services.forEach(f => {
     const result = spawnSync(process.execPath, ['--check', path.join('/home/user/-chairmankarandeep', f)]);
@@ -137,6 +145,42 @@ test('Service proxy routes configured', () => {
   if (!/karan\|chairman\|jarvis/.test(code)) throw new Error('No backend proxy route');
   if (!code.includes('x-service-token')) throw new Error('Proxy does not identify itself to backends');
   if (!code.includes("pathname === '/api/status'")) throw new Error('No server-side status endpoint');
+});
+
+// The chat used to be proxied to the Karan service, which sleeps. Answering in
+// the dashboard process is what stops the box looking dead after a quiet spell.
+test('Chat is answered locally, not proxied to a sleeping backend', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  if (!code.includes("pathname === '/api/chat'")) throw new Error('No local chat endpoint');
+  if (code.includes("'/api/karan/api/chat'")) throw new Error('Page still proxies chat to Karan');
+  if (!code.includes("require('./scripts/llm')")) throw new Error('Chat is not wired to the provider chain');
+});
+
+// The approval gate is the promise the whole system rests on: nothing goes
+// online without Karan saying yes to that specific thing. These check the wiring
+// is present; scripts/test-agents.js checks it actually holds.
+test('Nothing external runs without passing through the approval gate', () => {
+  const chat = fs.readFileSync('/home/user/-chairmankarandeep/scripts/chat.js', 'utf8');
+  if (!chat.includes('approvals.request(')) throw new Error('Chat does not register approvals');
+  // The web call lives inside fulfil(), and fulfil() may only ever be handed to
+  // the gate as a runner. Awaiting it directly would go online without a yes.
+  if (!/\(\)\s*=>\s*fulfil\(/.test(chat)) throw new Error('The web call is not the approval runner');
+  if (/await\s+fulfil\(/.test(chat)) throw new Error('Chat calls the web without approval');
+
+  const approvals = fs.readFileSync('/home/user/-chairmankarandeep/scripts/approvals.js', 'utf8');
+  if (/approveAll|approve_all/i.test(approvals)) throw new Error('A blanket approval exists');
+
+  const dash = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  if (!dash.includes("pathname === '/api/approvals'")) throw new Error('No approvals endpoint');
+  if (!dash.includes('approvals.approve')) throw new Error('Approvals cannot be approved');
+  if (!dash.includes('approvals.deny')) throw new Error('Approvals cannot be denied');
+});
+
+// A model-supplied URL is an untrusted URL, and this runs on a server.
+test('The web layer refuses private addresses and non-http schemes', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/scripts/web.js', 'utf8');
+  if (!/169\\\.254/.test(code)) throw new Error('Link-local addresses are not blocked');
+  if (!code.includes("u.protocol !== 'http:'")) throw new Error('Schemes are not checked');
 });
 
 // Health must be checked server-side; a browser fetch straight to the backends is
