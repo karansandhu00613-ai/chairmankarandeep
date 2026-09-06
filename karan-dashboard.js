@@ -263,6 +263,172 @@ function proxyRequest(baseUrl, path, method, body) {
   });
 }
 
+function bgScript() {
+  // A raymarched height field, shaded and fogged, drawn straight to a canvas.
+  // No library: three.js from a CDN is one more thing that can fail, and the
+  // Google Fonts outage already proved what a blocked external does to a page.
+  // GLSL lives in script tags so the template literal never has to escape it.
+  return `
+<script type="x-shader/x-vertex" id="vs">
+attribute vec2 pos;
+void main(){ gl_Position = vec4(pos, 0.0, 1.0); }
+</script>
+<script type="x-shader/x-fragment" id="fs">
+precision highp float;
+uniform vec2  u_res;
+uniform float u_time;
+
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+
+float fbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++){ v += a * noise(p); p *= 2.03; a *= 0.5; }
+  return v;
+}
+
+// The surface. Two drifting octaves so the form keeps folding over itself.
+float H(vec2 p){
+  return fbm(p * 0.9 + vec2(u_time * 0.035, u_time * 0.021)) * 1.15
+       + fbm(p * 2.7 - vec2(u_time * 0.017, 0.0)) * 0.16;
+}
+
+vec3 normalAt(vec2 p, float e){
+  float h = H(p);
+  return normalize(vec3(h - H(p + vec2(e, 0.0)), e, h - H(p + vec2(0.0, e))));
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
+
+  vec3 ro = vec3(0.0, 1.55, -2.6);
+  vec3 rd = normalize(vec3(uv, 1.35));
+
+  float t = 0.0;
+  float hit = 0.0;
+  for (int i = 0; i < 78; i++){
+    vec3 p = ro + rd * t;
+    float d = p.y - H(p.xz);
+    if (d < 0.0016 * t){ hit = 1.0; break; }
+    t += d * 0.62;
+    if (t > 22.0) break;
+  }
+
+  vec3 paper = vec3(0.973, 0.953, 0.937);
+  vec3 col   = paper;
+
+  if (hit > 0.5){
+    vec3 p = ro + rd * t;
+    vec3 n = normalAt(p.xz, 0.014);
+
+    vec3 lightDir = normalize(vec3(-0.55, 0.75, -0.35));
+    float diff = clamp(dot(n, lightDir), 0.0, 1.0);
+    float rim  = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 2.4);
+
+    // Desert Rose, kept pale: clay in the lit faces, burgundy in the folds.
+    vec3 lit   = vec3(0.988, 0.965, 0.949);
+    vec3 shade = vec3(0.780, 0.596, 0.639);
+    vec3 deep  = vec3(0.541, 0.290, 0.400);
+
+    col = mix(deep, shade, smoothstep(0.0, 0.45, diff));
+    col = mix(col, lit,   smoothstep(0.35, 1.0, diff));
+    col += rim * vec3(0.16, 0.10, 0.13);
+
+    // Fade into the page so panels always sit on calm ground.
+    col = mix(col, paper, clamp(t / 16.0, 0.0, 1.0));
+  }
+
+  // Let the surface climb, but keep the headline band calm.
+  float top = smoothstep(0.04, 0.80, gl_FragCoord.y / u_res.y);
+  col = mix(col, paper, top * 0.42);
+
+  // Break up banding on wide flat gradients.
+  col += (hash(gl_FragCoord.xy) - 0.5) * 0.006;
+
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+<script>
+(function () {
+  var canvas = document.getElementById('bg');
+  if (!canvas) return;
+
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var gl = null;
+  try {
+    gl = canvas.getContext('webgl', { antialias: false, alpha: false, powerPreference: 'low-power' })
+      || canvas.getContext('experimental-webgl');
+  } catch (e) { gl = null; }
+  // No WebGL: the CSS gradient already on the canvas stands in.
+  if (!gl) return;
+
+  function build(type, id) {
+    var s = gl.createShader(type);
+    gl.shaderSource(s, document.getElementById(id).textContent);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { gl = null; return null; }
+    return s;
+  }
+
+  var vs = build(gl.VERTEX_SHADER, 'vs');
+  var fs = vs && build(gl.FRAGMENT_SHADER, 'fs');
+  if (!vs || !fs) return;
+
+  var prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
+  gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, 'pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uRes  = gl.getUniformLocation(prog, 'u_res');
+  var uTime = gl.getUniformLocation(prog, 'u_time');
+
+  function resize() {
+    // Render at the device's real pixel density, capped so a 3x phone screen
+    // does not quadruple the fragment work for no visible gain.
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.floor(canvas.clientWidth  * dpr);
+    var h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w; canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+    gl.uniform2f(uRes, canvas.width, canvas.height);
+  }
+
+  var start = Date.now();
+  var running = true;
+  document.addEventListener('visibilitychange', function () {
+    running = !document.hidden;
+    if (running) requestAnimationFrame(frame);
+  });
+
+  function frame() {
+    if (!running) return;
+    resize();
+    gl.uniform1f(uTime, still ? 8.0 : (Date.now() - start) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // A still frame is enough when motion is unwelcome.
+    if (!still) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.addEventListener('resize', function () { if (still) requestAnimationFrame(frame); });
+})();
+<\/script>`;
+}
+
 function baseStyles() {
   return `
     :root {
@@ -285,15 +451,14 @@ function baseStyles() {
       background: var(--bg); color: var(--ink);
       min-height: 100vh; overflow-x: hidden; -webkit-font-smoothing: antialiased;
     }
-    /* Soft drifting light. Kept pale so text contrast never depends on it. */
-    .aurora { position: fixed; inset: -25%; z-index: 0; filter: blur(100px); opacity: .5; pointer-events: none; }
-    .aurora span { position: absolute; border-radius: 50%; display: block; }
-    .aurora .a1 { width: 42vw; height: 42vw; left: 4%;  top: 2%;   background: #f0d9d0; animation: drift1 24s ease-in-out infinite; }
-    .aurora .a2 { width: 36vw; height: 36vw; right: 6%; top: 22%;  background: #e7d3e0; animation: drift2 29s ease-in-out infinite; }
-    .aurora .a3 { width: 30vw; height: 30vw; left: 34%; bottom: 0; background: #f5e6d8; animation: drift3 33s ease-in-out infinite; }
-    @keyframes drift1 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(8vw,6vh) scale(1.16); } }
-    @keyframes drift2 { 0%,100% { transform: translate(0,0) scale(1.08); } 50% { transform: translate(-7vw,9vh) scale(.92); } }
-    @keyframes drift3 { 0%,100% { transform: translate(0,0) scale(.96); } 50% { transform: translate(5vw,-7vh) scale(1.18); } }
+    /* A raymarched surface drawn in WebGL at device-pixel-ratio, so it stays
+       sharp on high-density screens. CSS gradient behind it is the fallback
+       when WebGL is unavailable, and the ground colour while it initialises. */
+    #bg {
+      position: fixed; inset: 0; z-index: 0; display: block;
+      width: 100%; height: 100%; pointer-events: none;
+      background: radial-gradient(120% 90% at 20% 0%, #fdf6f1 0%, #f7f2ee 45%, #f2e9e6 100%);
+    }
 
     .card {
       background: var(--paper); border: 1px solid var(--line);
@@ -365,7 +530,8 @@ ${baseStyles()}
 </style>
 </head>
 <body>
-<div class="aurora"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+<canvas id="bg" aria-hidden="true"></canvas>
+${bgScript()}
 
 <div class="wrap">
   <div class="card">
@@ -456,6 +622,41 @@ ${baseStyles()}
   .ghost { background: var(--paper); color: var(--ink-soft); border: 1px solid var(--line); padding: 9px 15px; font-size: 13px; box-shadow: none; }
   .ghost:hover { background: var(--accent-soft); color: var(--accent); box-shadow: var(--lift-1); }
 
+
+  /* Hero. Sits over the WebGL surface, so everything here carries its own
+     contrast rather than borrowing it from the background. */
+  .hero { padding: 72px 8px 40px; text-align: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 7px 15px 7px 11px; border-radius: 999px;
+    background: rgba(255,255,255,.72); backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--line); box-shadow: var(--lift-1);
+    font-size: 12.5px; font-weight: 500; color: var(--ink-soft);
+    margin-bottom: 26px;
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .hero h2 {
+    font-size: clamp(36px, 6.2vw, 68px); line-height: 1.03;
+    letter-spacing: -.035em; font-weight: 700; color: var(--ink);
+    margin-bottom: 20px; text-wrap: balance;
+  }
+  .hero h2 .accent {
+    background: linear-gradient(120deg, var(--accent), var(--clay) 55%, var(--accent-lift));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.lead {
+    font-size: clamp(15px, 1.7vw, 18px); line-height: 1.6; color: var(--ink-soft);
+    max-width: 620px; margin: 0 auto 30px; text-wrap: pretty;
+  }
+  .hero .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .scroll-hint {
+    margin-top: 54px; color: var(--muted); font-size: 11.5px; letter-spacing: .1em;
+    animation: nudge 2.4s ease-in-out infinite;
+  }
+  @keyframes nudge { 0%,100% { transform: translateY(0); opacity: .65; } 50% { transform: translateY(5px); opacity: 1; } }
+  @media (max-width: 860px) { .hero { padding: 44px 4px 28px; } }
+
   .section { display: none; }
   .section.active { display: block; animation: fade .45s cubic-bezier(.2,.8,.2,1); }
   @keyframes fade { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
@@ -512,7 +713,8 @@ ${baseStyles()}
 </style>
 </head>
 <body>
-<div class="aurora"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+<canvas id="bg" aria-hidden="true"></canvas>
+${bgScript()}
 
 <div class="shell">
   <aside class="card">
@@ -533,6 +735,18 @@ ${baseStyles()}
         <button class="ghost" onclick="logout()">Sign out</button>
       </div>
     </div>
+
+    <section class="hero" id="hero">
+      <div class="pill"><span class="dot" id="pill-dot"></span><span id="pill-text">Checking services...</span></div>
+      <h2>Everything you run,<br><span class="accent">answered by one operator.</span></h2>
+      <p class="lead">Karan, Chairman and Jarvis behind a single command line. Sub-agents do
+      the work in the open; nothing reaches the outside world without your approval.</p>
+      <div class="cta">
+        <button onclick="goSection('chat')">Open the chat</button>
+        <button class="ghost" onclick="goSection('overview')">See system status</button>
+      </div>
+      <div class="scroll-hint">SCROLL</div>
+    </section>
 
     <section id="overview" class="section active">
       <div class="panel card reveal">
@@ -583,6 +797,13 @@ ${baseStyles()}
 <script>
   var TITLES = { overview: 'Overview', chat: 'Chat', monitor: 'Chairman OS', voice: 'Voice' };
   var CHAIRMAN_URL = '${CHAIRMAN_API}';
+
+  function goSection(name) {
+    var item = document.querySelector('.nav-item[data-sec="' + name + '"]');
+    if (item) item.click();
+    var target = document.getElementById(name);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   document.querySelectorAll('.nav-item').forEach(function (item) {
     item.addEventListener('click', function () {
@@ -653,9 +874,21 @@ ${baseStyles()}
         grid.appendChild(el);
         tilt(el);
       });
+      var names = Object.keys(data);
+      var up = names.filter(function (n) { return data[n].online; }).length;
+      var dot = document.getElementById('pill-dot');
+      var txt = document.getElementById('pill-text');
+      if (dot && txt) {
+        dot.style.background = up === names.length ? 'var(--accent)' : 'var(--danger)';
+        txt.textContent = up === names.length
+          ? 'All ' + names.length + ' services operational'
+          : up + ' of ' + names.length + ' services responding';
+      }
     } catch (e) {
       grid.innerHTML = '<div class="svc down"><span class="dot"></span><div>' +
         '<div class="name">status</div><div class="sub">check failed</div></div></div>';
+      var t = document.getElementById('pill-text');
+      if (t) t.textContent = 'Status check failed';
     }
   }
   checkStatus();
