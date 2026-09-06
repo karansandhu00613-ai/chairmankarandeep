@@ -53,7 +53,11 @@ test('All service files parse', () => {
     'karan-chief-operator.js',
     'chairman-enhanced.js',
     'chairman.js',
-    'jarvis.js'
+    'jarvis.js',
+    // Required by the dashboard at startup, so a syntax error here stops it
+    // booting just as surely as one in the server file itself.
+    'scripts/llm.js',
+    'scripts/chairman-prompt.js'
   ];
   services.forEach(f => {
     const result = spawnSync(process.execPath, ['--check', path.join('/home/user/-chairmankarandeep', f)]);
@@ -137,6 +141,15 @@ test('Service proxy routes configured', () => {
   if (!/karan\|chairman\|jarvis/.test(code)) throw new Error('No backend proxy route');
   if (!code.includes('x-service-token')) throw new Error('Proxy does not identify itself to backends');
   if (!code.includes("pathname === '/api/status'")) throw new Error('No server-side status endpoint');
+});
+
+// The chat used to be proxied to the Karan service, which sleeps. Answering in
+// the dashboard process is what stops the box looking dead after a quiet spell.
+test('Chat is answered locally, not proxied to a sleeping backend', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/karan-dashboard.js', 'utf8');
+  if (!code.includes("pathname === '/api/chat'")) throw new Error('No local chat endpoint');
+  if (code.includes("'/api/karan/api/chat'")) throw new Error('Page still proxies chat to Karan');
+  if (!code.includes("require('./scripts/llm')")) throw new Error('Chat is not wired to the provider chain');
 });
 
 // Health must be checked server-side; a browser fetch straight to the backends is

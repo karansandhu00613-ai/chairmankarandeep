@@ -4,6 +4,8 @@
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
+const llm = require('./scripts/llm');
+const chairmanPrompt = require('./scripts/chairman-prompt');
 
 const PORT = parseInt(process.env.PORT || '8000');
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
@@ -189,8 +191,40 @@ const server = http.createServer(async (req, res) => {
       const results = await Promise.all([KARAN_API, CHAIRMAN_API, JARVIS_API].map(checkBackend));
       const status = {};
       names.forEach((n, i) => { status[n] = results[i]; });
+      // The chat answers from here, so the page needs to know whether a
+      // provider key is actually set rather than discovering it on send.
+      status.brain = { providers: llm.configured().map(n => llm.PROVIDERS[n].label) };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(status));
+    }
+
+    // The Chairman answers here, in this process, through the free provider
+    // chain. It deliberately does not depend on a backend service: those sleep,
+    // and the chat box being dead for the first minute after a quiet spell was
+    // the single thing that made the whole system look broken.
+    if (pathname === '/api/chat' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let message = '';
+      try { message = String(JSON.parse(raw).message || '').trim(); } catch (e) { message = ''; }
+      if (!message) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Empty message' }));
+      }
+
+      const answer = await llm.ask(message, chairmanPrompt.SYSTEM);
+      if (!answer.ok) {
+        // Every reason, named. A spent free tier and a wrong key need different
+        // fixes, and a generic failure would hide which one this is.
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: answer.error, tried: answer.tried }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({
+        reply: answer.text,
+        provider: answer.provider,
+        model: answer.model,
+        failedOver: answer.tried.map(t => t.provider)
+      }));
     }
 
     // Dashboard page
@@ -279,79 +313,62 @@ uniform vec2  u_res;
 uniform float u_time;
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-
-mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
-
-// A thin slab. Seven of them, tumbling on their own clocks, make the field.
-float box(vec3 p, vec3 b){
-  vec3 q = abs(p) - b;
-  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-
-float map(vec3 p){
-  float d = 1e9;
-  for (int i = 0; i < 7; i++){
-    float fi = float(i);
-    vec3 q = p - vec3(sin(fi * 2.3 + u_time * 0.13) * 1.9,
-                      cos(fi * 1.9 + u_time * 0.10) * 0.95,
-                      fi * 1.02 - 1.6);
-    q.xz *= rot(u_time * 0.16 + fi);
-    q.xy *= rot(fi * 0.7);
-    d = min(d, box(q, vec3(0.58, 0.045, 0.58)));
-  }
-  return d;
-}
-
-vec3 nrm(vec3 p){
-  vec2 e = vec2(0.0012, 0.0);
-  return normalize(vec3(map(p + e.xyy) - map(p - e.xyy),
-                        map(p + e.yxy) - map(p - e.yxy),
-                        map(p + e.yyx) - map(p - e.yyx)));
-}
+float hash1(float n){ return fract(sin(n) * 43758.5453); }
 
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5 * u_res) / u_res.y;
-
-  vec3 ro = vec3(0.0, 0.0, -4.5);
-  vec3 rd = normalize(vec3(uv, 1.6));
-
-  float t = 0.0;
-  float hit = 0.0;
-  for (int i = 0; i < 82; i++){
-    vec3 p = ro + rd * t;
-    float d = map(p);
-    if (d < 0.002){ hit = 1.0; break; }
-    t += d;
-    if (t > 16.0) break;
-  }
 
   vec3 ivory = vec3(0.980, 0.957, 0.914);
   vec3 ruby  = vec3(0.608, 0.106, 0.188);
   vec3 gold  = vec3(0.910, 0.639, 0.239);
   vec3 col   = ivory;
 
-  if (hit > 0.5){
-    vec3 p = ro + rd * t;
-    vec3 n = nrm(p);
+  // Nodes at real depth: a far node is small and pale, a near one large.
+  // Drawn at high opacity in their own colour rather than as a faint wash,
+  // because ruby at low alpha over ivory reads as pink, not ruby.
+  for (int i = 0; i < 48; i++){
+    float fi = float(i);
 
-    float fres = pow(1.0 - abs(dot(n, rd)), 2.2);
-    float diff = clamp(dot(n, normalize(vec3(-0.4, 0.8, -0.5))), 0.0, 1.0);
-    float spec = pow(clamp(dot(reflect(rd, n), normalize(vec3(-0.35, 0.85, -0.4))), 0.0, 1.0), 38.0);
+    float z = fract(fi * 0.371 + u_time * 0.035);
+    float depth = mix(5.5, 0.75, z);
 
-    // Split the refraction so the edges throw gold and the bodies hold ruby.
-    float split = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 glass = mix(ruby, gold, clamp(split * 0.78 + fres * 0.22, 0.0, 1.0));
+    vec2 c = vec2(hash1(fi * 7.3) - 0.5, hash1(fi * 3.1) - 0.5) * 3.6;
+    c += vec2(sin(u_time * 0.21 + fi), cos(u_time * 0.17 + fi * 1.3)) * 0.18;
+    vec2 pp = c / depth;
 
-    // Deeper bodies so ruby and gold actually read against ivory, with the
-    // edges kept bright so the slabs still look like glass rather than card.
-    col = mix(ivory, glass, 0.62 + fres * 0.34);
-    col *= 0.92 + diff * 0.22;
-    col += spec * 0.55 * mix(vec3(1.0), gold, 0.6);
-    col = mix(col, ivory, clamp(t / 15.0, 0.0, 1.0));
+    // Links first, so nodes always sit on top of their own threads.
+    for (int j = 1; j <= 2; j++){
+      float fj = fi + float(j);
+      vec2 c2 = vec2(hash1(fj * 7.3) - 0.5, hash1(fj * 3.1) - 0.5) * 3.6;
+      c2 += vec2(sin(u_time * 0.21 + fj), cos(u_time * 0.17 + fj * 1.3)) * 0.18;
+      vec2 q2 = c2 / depth;
+
+      vec2 ab = q2 - pp;
+      if (length(ab) < 0.42){
+        vec2 ap = uv - pp;
+        float h = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-5), 0.0, 1.0);
+        float dl = length(ap - ab * h);
+        float line = smoothstep(0.0032, 0.0, dl) * (1.0 - z * 0.6);
+        col = mix(col, ruby, line * 0.16);
+      }
+    }
+
+    float r = (0.034 / depth) * (1.0 + hash1(fi) * 1.4);
+    float d = length(uv - pp);
+    float node = smoothstep(r, r * 0.28, d);
+
+    // A gold minority so the field is not one flat hue.
+    vec3 tint = hash1(fi * 5.0) > 0.76 ? gold : ruby;
+    float near = 1.0 - z * 0.55;
+    col = mix(col, tint, node * near);
+
+    // A soft halo, kept faint, to give the near nodes some bloom.
+    float halo = smoothstep(r * 4.5, r, d) - node;
+    col = mix(col, tint, clamp(halo, 0.0, 1.0) * 0.09 * near);
   }
 
   // Keep the headline band calm.
-  col = mix(col, ivory, smoothstep(0.20, 0.94, gl_FragCoord.y / u_res.y) * 0.34);
+  col = mix(col, ivory, smoothstep(0.16, 0.98, gl_FragCoord.y / u_res.y) * 0.52);
   col += (hash(gl_FragCoord.xy) - 0.5) * 0.006;
 
   gl_FragColor = vec4(col, 1.0);
@@ -763,8 +780,8 @@ ${bgScript()}
 
     <section id="chat" class="section">
       <div class="panel card reveal">
-        <h3>Chat</h3>
-        <p class="hint">Talks to the Karan service.</p>
+        <h3>Chairman</h3>
+        <p class="hint" id="brain-hint">Checking which model is answering...</p>
         <div class="chat-log" id="chat-log"></div>
         <div class="row">
           <input id="chat-input" placeholder="Ask something..." autocomplete="off">
@@ -868,6 +885,10 @@ ${bgScript()}
       var res = await fetch('/api/status');
       if (res.status === 401) { location.href = '/'; return; }
       var data = await res.json();
+      // The brain is not a service tile; it decides what the chat box can say.
+      var brain = data.brain || { providers: [] };
+      delete data.brain;
+      showBrain(brain);
       grid.innerHTML = '';
       Object.keys(data).forEach(function (name) {
         var s = data[name];
@@ -909,6 +930,26 @@ ${bgScript()}
     return el;
   }
 
+  // Says plainly whether the Chairman can answer at all, and on which provider,
+  // instead of letting the first message be the way that is discovered.
+  function showBrain(brain) {
+    var hint = document.getElementById('brain-hint');
+    var send = document.getElementById('chat-send');
+    if (!hint) return;
+    var list = brain.providers || [];
+    if (!list.length) {
+      hint.textContent = 'No model key is set, so the Chairman cannot answer yet. '
+        + 'Set GEMINI_API_KEY or GROQ_API_KEY in the service environment.';
+      if (send) send.disabled = true;
+      return;
+    }
+    hint.textContent = list.length > 1
+      ? 'Answering on ' + list[0] + '. If its free limit is spent it moves to '
+        + list.slice(1).join(', ') + ' automatically.'
+      : 'Answering on ' + list[0] + '. Add a second key for automatic failover.';
+    if (send) send.disabled = false;
+  }
+
   async function sendMessage() {
     var input = document.getElementById('chat-input');
     var send = document.getElementById('chat-send');
@@ -919,20 +960,17 @@ ${bgScript()}
     input.value = '';
     send.disabled = true;
 
-    // Waking a sleeping backend takes up to a minute, so say so rather than
-    // leaving a dead-looking box.
     var waiting = addMsg('Thinking...', 'them');
     var waitedFor = 0;
     var ticker = setInterval(function () {
       waitedFor += 1;
-      if (waitedFor === 4) waiting.textContent = 'Waking the Karan service, this can take up to a minute...';
-      else if (waitedFor > 4) waiting.textContent = 'Still waking... ' + waitedFor + 's';
+      if (waitedFor > 3) waiting.textContent = 'Thinking... ' + waitedFor + 's';
     }, 1000);
 
     var settle = function () { clearInterval(ticker); waiting.remove(); };
 
     try {
-      var res = await fetch('/api/karan/api/chat', {
+      var res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text })
@@ -940,16 +978,17 @@ ${bgScript()}
       var data = await res.json().catch(function () { return {}; });
       settle();
       if (!res.ok) {
-        addMsg('Karan service returned ' + res.status + (data.error ? ': ' + data.error : ''), 'sys');
+        addMsg(data.error || ('Chat failed with status ' + res.status), 'sys');
       } else {
-        var m = data.message;
-        var reply = typeof m === 'string' ? m
-          : (m && typeof m.text === 'string' ? m.text : JSON.stringify(data, null, 2));
-        addMsg(reply, 'them');
+        addMsg(data.reply, 'them');
+        if (data.failedOver && data.failedOver.length) {
+          addMsg(data.failedOver.join(' and ') + ' was unavailable, so '
+            + data.provider + ' answered.', 'sys');
+        }
       }
     } catch (e) {
       settle();
-      addMsg('Could not reach the Karan service: ' + e.message, 'sys');
+      addMsg('Could not reach the dashboard: ' + e.message, 'sys');
     }
     send.disabled = false;
     input.focus();
