@@ -5,7 +5,9 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const llm = require('./scripts/llm');
-const chairmanPrompt = require('./scripts/chairman-prompt');
+const chat = require('./scripts/chat');
+const approvals = require('./scripts/approvals');
+const agents = require('./scripts/agents');
 
 const PORT = parseInt(process.env.PORT || '8000');
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
@@ -211,7 +213,7 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error: 'Empty message' }));
       }
 
-      const answer = await llm.ask(message, chairmanPrompt.SYSTEM);
+      const answer = await chat.turn(message);
       if (!answer.ok) {
         // Every reason, named. A spent free tier and a wrong key need different
         // fixes, and a generic failure would hide which one this is.
@@ -219,11 +221,88 @@ const server = http.createServer(async (req, res) => {
         return res.end(JSON.stringify({ error: answer.error, tried: answer.tried }));
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(answer));
+    }
+
+    // The approval queue. Nothing external runs until one of these is approved,
+    // and approving runs it exactly once.
+    if (pathname === '/api/approvals' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({
-        reply: answer.text,
-        provider: answer.provider,
-        model: answer.model,
-        failedOver: answer.tried.map(t => t.provider)
+        pending: approvals.pending(),
+        history: approvals.history(10)
+      }));
+    }
+
+    const decision = pathname.match(/^\/api\/approvals\/([a-f0-9]+)\/(approve|deny)$/);
+    if (decision && req.method === 'POST') {
+      const [, id, verb] = decision;
+      const out = verb === 'approve' ? await approvals.approve(id) : approvals.deny(id);
+      res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(out));
+    }
+
+    // The business scout. Starting it is Karan pressing the button with the
+    // queries in front of him, which is his approval for this run. What it
+    // produces is a proposal that waits for a separate yes; the scout itself
+    // sets nothing up.
+    if (pathname === '/api/scout' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let queries = [];
+      try {
+        queries = (JSON.parse(raw).queries || [])
+          .map(q => String(q).trim()).filter(Boolean).slice(0, 6);
+      } catch (e) { queries = []; }
+      if (!queries.length) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Give it at least one thing to look for.' }));
+      }
+      if (!llm.configured().length) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          error: 'No model key is set, so the sub-agents cannot reason. '
+            + 'Set GEMINI_API_KEY or GROQ_API_KEY.'
+        }));
+      }
+
+      const run = agents.scout(queries, {
+        onProposal: (proposal, r) => {
+          approvals.request(
+            'venture.setup',
+            'Set up a test for: ' + proposal.problem.split('\n')[0].slice(0, 160),
+            { runId: r.id, ideaId: proposal.id, verdict: proposal.verdict },
+            async () => ({
+              note: 'Approved. The build plan is ready to execute; nothing has been '
+                + 'created or published yet.',
+              plan: proposal.build.text
+            }));
+        }
+      });
+      res.writeHead(202, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ id: run.id, status: run.status, queries }));
+    }
+
+    const runMatch = pathname.match(/^\/api\/scout\/([a-f0-9]+)$/);
+    if (runMatch && req.method === 'GET') {
+      const run = agents.getRun(runMatch[1]);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'No such run' }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // `done` is a promise and the runner functions are not serialisable.
+      return res.end(JSON.stringify({
+        id: run.id, status: run.status, queries: run.queries, steps: run.steps,
+        notes: run.notes, error: run.error, analysis: run.analysis,
+        citations: run.citations, evidenceCount: run.evidence.length,
+        proposals: run.proposals.map(p => ({
+          id: p.id, verdict: p.verdict, problem: p.problem,
+          market: p.market.ok ? p.market.text : p.market.error,
+          build: p.build.ok ? p.build.text : p.build.error,
+          money: p.money.ok ? p.money.text : p.money.error,
+          review: p.review && (p.review.ok ? p.review.text : p.review.error),
+          agents: p.agents
+        }))
       }));
     }
 
@@ -725,6 +804,40 @@ ${baseStyles()}
   .row { display: flex; gap: 10px; }
   .row input { flex: 1; }
 
+  /* Approvals, the scout, and the sub-agent step list. */
+  .badge {
+    display: inline-block; margin-left: 7px; min-width: 18px; padding: 1px 6px;
+    border-radius: 9px; background: var(--accent); color: var(--on-accent);
+    font-size: 11px; font-weight: 700; text-align: center; vertical-align: middle;
+  }
+  /* display:inline-block above would otherwise beat the browser's own rule for
+     the hidden attribute, leaving a "0" badge sitting in the nav. */
+  .badge[hidden] { display: none; }
+  .ask {
+    border: 1px solid rgba(232,163,61,.5); background: var(--gold-soft);
+    border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  .ask .what { font-weight: 600; color: var(--ink); margin-bottom: 4px; }
+  .ask .meta { font-size: 12px; color: var(--muted); margin-bottom: 11px; word-break: break-all; }
+  .ask .row { justify-content: flex-start; }
+  .ask button { padding: 8px 16px; font-size: 13px; }
+  .ask.settled { border-color: var(--line); background: #fdf8ef; opacity: .85; }
+  .ask.settled .row { display: none; }
+  .verdict {
+    display: inline-block; padding: 2px 9px; border-radius: 8px; font-size: 11px;
+    font-weight: 700; letter-spacing: .04em; border: 1px solid var(--line);
+    background: var(--paper); color: var(--muted);
+  }
+  .steps { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+  .steps .st { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-soft); }
+  .steps .st .pip { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
+  .steps .st.running .pip { background: var(--gold); animation: pulse 1.1s ease-in-out infinite; }
+  .steps .st.done .pip { background: var(--accent); }
+  .steps .st.failed .pip { background: var(--danger); }
+  .steps .st .who { font-weight: 600; color: var(--ink); min-width: 118px; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .steps .st.running .pip { animation: none; } }
+
   @media (max-width: 860px) {
     .shell { grid-template-columns: 1fr; padding: 14px; }
     aside { position: static; }
@@ -744,6 +857,8 @@ ${bgScript()}
     <div class="nav">
       <div class="nav-item active" data-sec="overview"><span class="ico">◈</span><span>Overview</span></div>
       <div class="nav-item" data-sec="chat"><span class="ico">✦</span><span>Chat</span></div>
+      <div class="nav-item" data-sec="approvals"><span class="ico">◆</span><span>Approvals<span id="approval-badge" class="badge" hidden>0</span></span></div>
+      <div class="nav-item" data-sec="scout"><span class="ico">⌖</span><span>Scout</span></div>
       <div class="nav-item" data-sec="monitor"><span class="ico">▤</span><span>Chairman OS</span></div>
       <div class="nav-item" data-sec="voice"><span class="ico">◉</span><span>Voice</span></div>
     </div>
@@ -790,6 +905,35 @@ ${bgScript()}
       </div>
     </section>
 
+    <section id="approvals" class="section">
+      <div class="panel card reveal">
+        <h3>Waiting for you</h3>
+        <p class="hint">Nothing here has happened. Each item runs only when you approve
+        it, runs once, and expires if you leave it. There is no approve-all.</p>
+        <div id="approval-list"><p class="hint">Loading...</p></div>
+      </div>
+      <div class="panel card reveal" style="margin-top:18px">
+        <h3>Decided</h3>
+        <div id="approval-history"><p class="hint">Nothing decided yet.</p></div>
+      </div>
+    </section>
+
+    <section id="scout" class="section">
+      <div class="panel card reveal">
+        <h3>Business scout</h3>
+        <p class="hint">Reads public complaints on Hacker News and Reddit, then puts
+        sub-agents on the problems that recur. It proposes; it never sets anything up.
+        Pressing Run is your approval for that run.</p>
+        <div class="row" style="margin-bottom:14px">
+          <input id="scout-queries" autocomplete="off"
+            placeholder="What to look for, comma separated">
+          <button id="scout-run" onclick="runScout()">Run</button>
+        </div>
+        <div id="scout-steps"></div>
+        <div class="log" id="scout-out">Give it a subject and press Run.</div>
+      </div>
+    </section>
+
     <section id="monitor" class="section">
       <div class="panel card reveal">
         <h3>Chairman Agent OS</h3>
@@ -817,7 +961,8 @@ ${bgScript()}
 </div>
 
 <script>
-  var TITLES = { overview: 'Overview', chat: 'Chat', monitor: 'Chairman OS', voice: 'Voice' };
+  var TITLES = { overview: 'Overview', chat: 'Chat', approvals: 'Approvals',
+    scout: 'Scout', monitor: 'Chairman OS', voice: 'Voice' };
   var CHAIRMAN_URL = '${CHAIRMAN_API}';
 
   function goSection(name) {
@@ -980,10 +1125,15 @@ ${bgScript()}
       if (!res.ok) {
         addMsg(data.error || ('Chat failed with status ' + res.status), 'sys');
       } else {
-        addMsg(data.reply, 'them');
+        if (data.reply) addMsg(data.reply, 'them');
         if (data.failedOver && data.failedOver.length) {
           addMsg(data.failedOver.join(' and ') + ' was unavailable, so '
             + data.provider + ' answered.', 'sys');
+        }
+        // He wants to go online. Nothing has been fetched yet.
+        if (data.kind === 'approval') {
+          askInChat(data.approval);
+          refreshApprovals();
         }
       }
     } catch (e) {
@@ -997,6 +1147,188 @@ ${bgScript()}
   document.getElementById('chat-input').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') sendMessage();
   });
+
+  // ---- Approvals -----------------------------------------------------------
+  // Nothing in this section has happened. Each card is an action that will run
+  // only if you press Approve, and only once.
+
+  function askCard(item, inChat) {
+    var el = document.createElement('div');
+    el.className = 'ask';
+    el.id = 'ask-' + item.id;
+
+    var what = document.createElement('div');
+    what.className = 'what';
+    what.textContent = item.summary;
+    el.appendChild(what);
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = item.kind + ' · asked ' + new Date(item.createdAt).toLocaleTimeString();
+    el.appendChild(meta);
+
+    if (item.status === 'pending') {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var yes = document.createElement('button');
+      yes.textContent = 'Approve';
+      var no = document.createElement('button');
+      no.className = 'ghost';
+      no.textContent = 'Deny';
+      yes.onclick = function () { decide(item.id, 'approve', el, inChat); };
+      no.onclick = function () { decide(item.id, 'deny', el, inChat); };
+      row.appendChild(yes);
+      row.appendChild(no);
+      el.appendChild(row);
+    } else {
+      el.className = 'ask settled';
+      meta.textContent += ' · ' + item.status;
+    }
+    return el;
+  }
+
+  function askInChat(item) {
+    var log = document.getElementById('chat-log');
+    log.appendChild(askCard(item, true));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function decide(id, verb, el, inChat) {
+    el.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+    var meta = el.querySelector('.meta');
+    meta.textContent = verb === 'approve' ? 'Running...' : 'Denying...';
+    try {
+      var res = await fetch('/api/approvals/' + id + '/' + verb, { method: 'POST' });
+      var data = await res.json().catch(function () { return {}; });
+      el.className = 'ask settled';
+      if (!res.ok || !data.ok) {
+        meta.textContent = data.error || ('Failed with status ' + res.status);
+      } else {
+        meta.textContent = verb === 'approve' ? 'Approved and run.' : 'Denied. Nothing ran.';
+        var r = data.item && data.item.result;
+        if (inChat && verb === 'approve' && r) {
+          if (r.answer) addMsg(r.answer, 'them');
+          if (r.sources && r.sources.length) {
+            addMsg('Sources: ' + r.sources.slice(0, 5).map(function (s) {
+              return s.url; }).join('  '), 'sys');
+          }
+        } else if (inChat && verb === 'deny') {
+          addMsg('Denied, so nothing was fetched and nothing was read.', 'sys');
+        }
+      }
+    } catch (e) {
+      meta.textContent = 'Could not reach the dashboard: ' + e.message;
+    }
+    refreshApprovals();
+  }
+
+  async function refreshApprovals() {
+    var list = document.getElementById('approval-list');
+    var hist = document.getElementById('approval-history');
+    var badge = document.getElementById('approval-badge');
+    try {
+      var res = await fetch('/api/approvals');
+      if (!res.ok) return;
+      var data = await res.json();
+
+      list.innerHTML = '';
+      if (!data.pending.length) {
+        list.innerHTML = '<p class="hint">Nothing is waiting on you.</p>';
+      } else {
+        data.pending.forEach(function (item) { list.appendChild(askCard(item, false)); });
+      }
+      if (badge) {
+        badge.hidden = data.pending.length === 0;
+        badge.textContent = data.pending.length;
+      }
+
+      hist.innerHTML = '';
+      if (!data.history.length) {
+        hist.innerHTML = '<p class="hint">Nothing decided yet.</p>';
+      } else {
+        data.history.forEach(function (item) { hist.appendChild(askCard(item, false)); });
+      }
+    } catch (e) { /* the status poll already reports connectivity */ }
+  }
+  refreshApprovals();
+  setInterval(refreshApprovals, 15000);
+
+  // ---- Business scout ------------------------------------------------------
+
+  var scoutTimer = null;
+
+  async function runScout() {
+    var input = document.getElementById('scout-queries');
+    var btn = document.getElementById('scout-run');
+    var out = document.getElementById('scout-out');
+    var queries = input.value.split(',').map(function (s) { return s.trim(); })
+      .filter(function (s) { return s; });
+    if (!queries.length) { out.textContent = 'Give it at least one subject.'; return; }
+
+    btn.disabled = true;
+    out.textContent = 'Starting...';
+    document.getElementById('scout-steps').innerHTML = '';
+    try {
+      var res = await fetch('/api/scout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queries: queries })
+      });
+      var data = await res.json().catch(function () { return {}; });
+      if (!res.ok) { out.textContent = data.error || ('Failed with status ' + res.status); btn.disabled = false; return; }
+      if (scoutTimer) clearInterval(scoutTimer);
+      scoutTimer = setInterval(function () { pollScout(data.id); }, 2000);
+      pollScout(data.id);
+    } catch (e) {
+      out.textContent = 'Could not reach the dashboard: ' + e.message;
+      btn.disabled = false;
+    }
+  }
+
+  async function pollScout(id) {
+    try {
+      var res = await fetch('/api/scout/' + id);
+      if (!res.ok) return;
+      var run = await res.json();
+
+      var steps = document.getElementById('scout-steps');
+      steps.className = 'steps';
+      steps.innerHTML = '';
+      run.steps.forEach(function (s) {
+        var el = document.createElement('div');
+        el.className = 'st ' + s.status;
+        el.innerHTML = '<span class="pip"></span><span class="who"></span><span class="what"></span>';
+        el.querySelector('.who').textContent = s.name;
+        el.querySelector('.what').textContent = s.detail || s.status;
+        steps.appendChild(el);
+      });
+
+      var lines = [];
+      if (run.evidenceCount) lines.push(run.evidenceCount + ' public posts read.');
+      run.notes.forEach(function (n) { lines.push('Note: ' + n); });
+      if (run.error) lines.push('Failed: ' + run.error);
+      if (run.analysis) lines.push('\\n--- What people are actually complaining about ---\\n' + run.analysis);
+      if (run.citations && run.citations.length) {
+        lines.push('\\nSources actually read:');
+        run.citations.forEach(function (c) { lines.push('  [' + c.n + '] ' + c.title + '  ' + c.url); });
+      }
+      run.proposals.forEach(function (p) {
+        lines.push('\\n=== ' + p.id + ' · ' + p.verdict + ' ===');
+        lines.push('\\nMarket:\\n' + p.market);
+        lines.push('\\nSmallest test:\\n' + p.build);
+        lines.push('\\nHow it would earn:\\n' + p.money);
+        if (p.review) lines.push('\\nArgued against:\\n' + p.review);
+      });
+      document.getElementById('scout-out').textContent = lines.join('\\n');
+
+      if (run.status !== 'running') {
+        clearInterval(scoutTimer);
+        scoutTimer = null;
+        document.getElementById('scout-run').disabled = false;
+        refreshApprovals();
+      }
+    } catch (e) { /* keep polling; a transient failure is not the end of the run */ }
+  }
 
   async function loadFeed(target, path) {
     var out = document.getElementById(target);
