@@ -303,6 +303,83 @@ const GEMINI = {
 const PROVIDERS = { gemini: GEMINI };
 KNOWN.forEach(spec => { PROVIDERS[spec.name] = compatible(spec); });
 
+/*
+ * Karan names his Render variables after the model, not the provider: `Gemini`,
+ * `deepseek-v4-flash`, `glm-5.3`. Only GROQ_API_KEY matched the convention
+ * above, which is exactly why the chat reported Groq as the only provider it
+ * ever tried.
+ *
+ * So a variable is matched by the vendor named inside it as well. `Gemini` is a
+ * Gemini key; `deepseek-v4-flash` is a DeepSeek key AND names the model to use.
+ * A name identifying no vendor is never guessed at -- sending a key to the
+ * wrong company is worse than not using it -- it is reported by unusable().
+ */
+const VENDOR_HINTS = [
+  { match: /gemini|google/i, provider: 'gemini' },
+  { match: /groq/i, provider: 'groq' },
+  { match: /openrouter/i, provider: 'openrouter' },
+  { match: /mistral|mixtral/i, provider: 'mistral' },
+  { match: /deepseek/i, provider: 'deepseek' },
+  { match: /openai|gpt/i, provider: 'openai' }
+];
+
+// A value that is a URL is a service address, not a credential. This is what
+// keeps KARAN_API, CHAIRMAN_API and JARVIS_API out of the provider chain.
+function isUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value);
+}
+
+/*
+ * `glm-5.3` is a model id; `NODE_OPTIONS` is not. Hyphens and dots are the
+ * discriminator: environment variables conventionally use underscores, model
+ * ids use hyphens and dots. Without that distinction an earlier version of this
+ * reported PATH and half the system environment as unused API keys, which is
+ * worse than saying nothing.
+ */
+function looksLikeModelId(name) {
+  return /[-.]/.test(name) && /\d/.test(name);
+}
+
+/** Every variable that appears to carry an API key, and what it maps to. */
+function scanEnvironment() {
+  const out = [];
+  Object.keys(process.env).forEach(varName => {
+    if (!process.env[varName] || isUrl(process.env[varName])) return;
+
+    const suffix = varName.match(/^([A-Za-z0-9_]+)_API_KEY$/);
+    if (suffix) {
+      out.push({ varName, provider: suffix[1].toLowerCase(), byName: true });
+      return;
+    }
+    const hint = VENDOR_HINTS.find(h => h.match.test(varName));
+    // Only a vendor name or a model-shaped name marks a variable as a key.
+    // Everything else in the environment is left alone.
+    if (!hint && !looksLikeModelId(varName)) return;
+    out.push({
+      varName,
+      provider: hint ? hint.provider : null,
+      model: looksLikeModelId(varName) ? varName : undefined
+    });
+  });
+  return out;
+}
+
+/** A provider that reads its key, and optionally its model, from one variable. */
+function boundTo(base, keyVar, model, providerName) {
+  const bound = Object.create(base);
+  bound.key = () => process.env[keyVar] || '';
+  bound.ask = function (prompt, system) {
+    const modelVar = envName(providerName, '_MODEL');
+    const already = process.env[modelVar];
+    // An explicit _MODEL still wins; the variable name only fills the gap.
+    if (model && !already) process.env[modelVar] = model;
+    return Promise.resolve(base.ask.call(bound, prompt, system)).finally(() => {
+      if (model && !already) delete process.env[modelVar];
+    });
+  };
+  return bound;
+}
+
 /**
  * Every provider available right now: the table above, plus anything found in
  * the environment. Rebuilt on each call so a variable added after start-up is
@@ -310,38 +387,49 @@ KNOWN.forEach(spec => { PROVIDERS[spec.name] = compatible(spec); });
  */
 function all() {
   const found = Object.assign({}, PROVIDERS);
-  Object.keys(process.env).forEach(varName => {
-    const m = varName.match(/^([A-Z0-9_]+)_API_KEY$/);
-    if (!m || !process.env[varName]) return;
-    const name = m[1].toLowerCase();
-    if (found[name]) return;                                  // already known
-    if (!process.env[m[1] + '_BASE_URL']) return;             // reported by unusable()
-    found[name] = compatible({
-      name,
-      label: m[1].charAt(0) + m[1].slice(1).toLowerCase().replace(/_/g, ' '),
-      base: process.env[m[1] + '_BASE_URL'],
+
+  scanEnvironment().forEach(entry => {
+    if (!entry.provider) return;
+
+    // Named after a vendor this chain knows: use it as that vendor's key.
+    if (!entry.byName && found[entry.provider]) {
+      if (found[entry.provider].key()) return;   // a proper _API_KEY already won
+      found[entry.provider] = boundTo(
+        found[entry.provider], entry.varName, entry.model, entry.provider);
+      return;
+    }
+    if (found[entry.provider]) return;                        // already known
+
+    const prefix = entry.varName.replace(/_API_KEY$/, '');
+    if (!process.env[prefix + '_BASE_URL']) return;           // reported below
+    found[entry.provider] = compatible({
+      name: entry.provider,
+      label: prefix.charAt(0) + prefix.slice(1).toLowerCase().replace(/_/g, ' '),
+      base: process.env[prefix + '_BASE_URL'],
       prefix: '',      // the base URL is expected to include any version path
       cost: 'unknown'
     });
   });
+
   return found;
 }
 
 /**
- * Keys that were set but cannot be used, and the one variable that would fix
- * each. A key Karan added should never disappear without explanation.
+ * Keys that were set but cannot be used, and what would fix each. A key Karan
+ * added should never disappear without explanation.
  */
 function unusable() {
   const known = all();
-  const out = [];
-  Object.keys(process.env).forEach(varName => {
-    const m = varName.match(/^([A-Z0-9_]+)_API_KEY$/);
-    if (!m || !process.env[varName]) return;
-    if (known[m[1].toLowerCase()]) return;
-    out.push({ variable: varName, needs: m[1] + '_BASE_URL' });
-  });
-  return out;
+  return scanEnvironment()
+    .filter(e => !e.provider || !known[e.provider] || !known[e.provider].key())
+    .map(e => ({
+      variable: e.varName,
+      needs: e.provider
+        ? e.provider.toUpperCase() + '_BASE_URL'
+        : 'a name saying which company the key is for, so it is never sent to the wrong one'
+    }));
 }
+
 
 function wantsResponsesApi(res) {
   if (res.status !== 400 && res.status !== 404) return false;

@@ -548,6 +548,68 @@ async function run() {
     delete process.env.SOMENEWAI_BASE_URL;
   });
 
+  // ---- Karan's actual Render variables ---------------------------------------
+  // Named after models, not providers. Only GROQ_API_KEY matched the old
+  // convention, which is why the chat reported Groq as the only thing it tried.
+
+  await test("Karan's own variable names map to the right providers", async () => {
+    await withEnv({
+      'Gemini': 'a-gemini-key',
+      'deepseek-v4-flash': 'a-deepseek-key',
+      'GROQ_API_KEY': 'a-groq-key',
+      'KARAN_API': 'https://karan-service.onrender.com',
+      'CHAIRMAN_API': 'https://chairman-os.onrender.com'
+    }, async () => {
+      const on = llm.configured();
+      check(on.indexOf('gemini') !== -1, 'Gemini was not picked up: ' + on.join());
+      check(on.indexOf('deepseek') !== -1, 'deepseek-v4-flash was not picked up: ' + on.join());
+      check(on.indexOf('groq') !== -1, 'GROQ_API_KEY was not picked up: ' + on.join());
+
+      // A service URL is not a credential and must never join the chain.
+      check(!llm.unusable().some(u => /KARAN_API|CHAIRMAN_API/.test(u.variable)),
+        'a service URL was reported as an unused key');
+    });
+    ['Gemini', 'deepseek-v4-flash', 'KARAN_API', 'CHAIRMAN_API']
+      .forEach(k => { delete process.env[k]; });
+  });
+
+  await test('A model-shaped variable also supplies the model id', async () => {
+    const ds = await fakeProvider([[200, groqText('deepseek answered')]]);
+    try {
+      await withEnv({ 'deepseek-v4-flash': 'k', DEEPSEEK_BASE_URL: ds.url }, async () => {
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.model === 'deepseek-v4-flash',
+          'did not take the model from the variable name: ' + r.model);
+        check(ds.calls.every(c => !isListCall(c.url)),
+          'asked for a model list when the name already named one');
+      });
+    } finally {
+      await ds.close();
+      delete process.env['deepseek-v4-flash'];
+    }
+  });
+
+  await test('A key naming no vendor is reported, never sent somewhere', async () => {
+    await withEnv({ 'glm-5.3': 'k', 'llama-3.3-70': 'k' }, async () => {
+      const stuck = llm.unusable().map(u => u.variable);
+      check(stuck.indexOf('glm-5.3') !== -1, 'glm-5.3 was dropped silently: ' + stuck.join());
+      check(stuck.indexOf('llama-3.3-70') !== -1, 'llama-3.3-70 was dropped silently');
+      // Neither names a company, so neither may be sent to one.
+      check(llm.configured().length === 0, 'guessed a vendor: ' + llm.configured().join());
+    });
+    ['glm-5.3', 'llama-3.3-70'].forEach(k => { delete process.env[k]; });
+  });
+
+  await test('Ordinary environment variables are never mistaken for keys', async () => {
+    await withEnv({}, async () => {
+      const stuck = llm.unusable().map(u => u.variable);
+      ['PATH', 'NODE_OPTIONS', 'PWD', 'HOME'].forEach(v => {
+        check(stuck.indexOf(v) === -1, v + ' was reported as an unused API key');
+      });
+    });
+  });
+
   console.log('\n📊 ' + passed + ' passed, ' + failed + ' failed\n');
   process.exit(failed > 0 ? 1 : 0);
 }
