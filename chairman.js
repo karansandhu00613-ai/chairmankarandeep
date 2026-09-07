@@ -1996,6 +1996,27 @@ let S = load();
 
 let DBBYTES = 0;
 function load(){ return structuredClone(BLANK); }   /* real load is async, in init() */
+
+/* Merge a saved state file over BLANK, keeping every field the shape the code
+   expects. A plain Object.assign lets a file written by an older version put an
+   object where an array belongs, and the first thing to call .filter() on it
+   throws inside a timer, which kills the process with no route to recovery.
+   A state file older than the code is normal, so it must not be fatal:
+   repair the field, say which one, and keep running. */
+function reconcile(blank, loaded){
+  const out = structuredClone(blank);
+  const repaired = [];
+  for(const k of Object.keys(loaded||{})){
+    const want = blank[k], got = loaded[k];
+    if(Array.isArray(want) && !Array.isArray(got)){ repaired.push(k); continue; }
+    if(want && typeof want==='object' && !Array.isArray(want)
+       && (Array.isArray(got) || (got!==null && typeof got!=='object'))){
+      repaired.push(k); continue;
+    }
+    out[k] = got;
+  }
+  return { state: out, repaired };
+}
 let saveTimer=null;
 function save(){ S.rev++; clearTimeout(saveTimer);
   saveTimer=setTimeout(()=>{ const t=JSON.stringify(S,null,1); DBBYTES=Buffer.byteLength(t);
@@ -2106,6 +2127,17 @@ This plaintext file is the ONLY copy. Rotate the password after first login
 `;
   await STORE.write(CREDS, body).catch(()=>{});
   return { id, pw };
+}
+
+/* True when this identity will not survive the next restart: a host with no
+   persistent disk, storing locally, with no OWNER_PW pinning the password.
+   Render, Heroku and Fly wipe the container on every redeploy AND on every
+   idle spin-down, which on a free plan is roughly every fifteen minutes. So
+   the generated password is dead almost as soon as it is printed. */
+function ephemeralIdentity(){
+  return (STORE.mode||'local')==='local'
+    && !!(process.env.RENDER||process.env.DYNO||process.env.FLY_APP_NAME)
+    && !process.env.OWNER_PW;
 }
 
 /* ---------- brute-force jail (public internet hardening) ---------- */
@@ -6595,8 +6627,12 @@ async function api(req,res,url){
           : 'Loading state — this takes a moment on first boot.' });
     }
     const t=telemetry();
+    /* `ephemeral` says the login will not survive the next restart. It carries
+       no secret, and the dashboard uses it to warn before sending the Owner to
+       a sign-in he cannot get past. */
     return send(res,200,{ ok:true, uptime_s:t.uptime_s, monitors:t.monitors,
-      monitors_down:t.monitors_down, smtp:t.smtp_ready, rev:S.rev });
+      monitors_down:t.monitors_down, smtp:t.smtp_ready, rev:S.rev,
+      store:(STORE.mode||'local'), ephemeral:ephemeralIdentity() });
   }
 
   if(p==='/api/login'){
@@ -8235,7 +8271,15 @@ let BOOT_ERROR = null;
       console.log('[store] github repo '+v.full_name+(v.private?' (private ✓)':' (PUBLIC ✗ — make it private!)'));
     }
     const raw=await STORE.read(DB);
-    if(raw){ S=Object.assign(structuredClone(BLANK), JSON.parse(raw)); DBBYTES=Buffer.byteLength(raw); }
+    if(raw){
+      const merged = reconcile(BLANK, JSON.parse(raw));
+      S = merged.state;
+      DBBYTES = Buffer.byteLength(raw);
+      if(merged.repaired.length){
+        console.log('[boot] state file written by an older version; reset to defaults: '
+          + merged.repaired.join(', '));
+      }
+    }
     /* Restore the identity from its own file. It wins over anything in
        data.json, because it is the copy that survives. */
     try{
@@ -8316,7 +8360,28 @@ let BOOT_ERROR = null;
       console.log('');
     }
     console.log(line);
-    if(boot){
+    if(boot && ephemeralIdentity()){
+      /* Printing a password here would be worse than useless. This host wipes
+         its disk on every restart, so the password is regenerated within
+         minutes and the only lasting effect is a credential sitting in a log
+         that anyone with dashboard access can read. Say what to set instead. */
+      console.log('');
+      console.log('   NO USABLE LOGIN — and none can be printed here.');
+      console.log('');
+      console.log('   This host has no persistent disk, so an identity generated');
+      console.log('   now is regenerated on the next restart. On a free plan that');
+      console.log('   is roughly every fifteen minutes.');
+      console.log('');
+      console.log('   Set these in the service Environment, then redeploy:');
+      console.log('');
+      console.log('        OWNER_ID   the owner id you want');
+      console.log('        OWNER_PW   the password you want');
+      console.log('');
+      console.log('   For the data to survive too, also set STORE=github with');
+      console.log('   GH_TOKEN and GH_REPO. See CHAIRMAN_OS.md.');
+      console.log('');
+      console.log(line);
+    } else if(boot){
       console.log('');
       console.log('   YOUR LOGIN  (copy these now)');
       console.log('');
