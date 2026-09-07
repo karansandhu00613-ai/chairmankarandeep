@@ -232,6 +232,61 @@ async function run() {
     }
   });
 
+  // /api/status waits on all three health checks with Promise.all, so one that
+  // never settles takes the whole endpoint with it and the page sits on
+  // "Checking services..." for good. The socket error does reach the request
+  // object today, so this passes with or without the response-stream guards in
+  // checkBackend; what it locks is the endpoint's behaviour under a backend
+  // that dies mid-response — answers quickly, and reports all three as down.
+  await test('A backend that dies mid-response does not hang the status check', async () => {
+    const cruel = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.write('{"ok":');          // deliberately incomplete
+      res.socket.destroy();          // and gone
+    });
+    await new Promise(r => cruel.listen(0, '127.0.0.1', r));
+    const url = 'http://127.0.0.1:' + cruel.address().port;
+
+    const dash = await startDashboard({ KARAN_API: url, CHAIRMAN_API: url, JARVIS_API: url });
+    try {
+      const cookie = await login(dash.port);
+      const started = Date.now();
+      const res = await Promise.race([
+        request(dash.port, 'GET', '/api/status', null, cookie),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('status never answered')), 8000))
+      ]);
+      check(res.status === 200, 'status returned ' + res.status);
+      check(Date.now() - started < 8000, 'status took too long');
+      ['karan', 'chairman', 'jarvis'].forEach(n => {
+        check(res.body[n] && res.body[n].online === false,
+          n + ' was not reported as down: ' + JSON.stringify(res.body[n]));
+      });
+    } finally { await dash.stop(); await new Promise(r => cruel.close(r)); }
+  });
+
+  // readBody is now bounded and settles on close and error as well as end.
+  // This checks the visible consequence — the server keeps serving after an
+  // upload is abandoned part-way — rather than the promise itself, which is not
+  // observable from outside the process.
+  await test('The server keeps serving after an abandoned request body', async () => {
+    const dash = await startDashboard();
+    try {
+      const cookie = await login(dash.port);
+      await new Promise((resolve, reject) => {
+        const req = http.request({
+          hostname: '127.0.0.1', port: dash.port, path: '/api/chat', method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': '9999', Cookie: cookie }
+        });
+        req.on('error', () => resolve());   // the abort surfaces here
+        req.write('{"message":"partial');
+        setTimeout(() => { req.destroy(); resolve(); }, 200);
+      });
+      // The proof is that the server is still answering afterwards.
+      const after = await request(dash.port, 'GET', '/api/health');
+      check(after.status === 200, 'the server stopped answering after an aborted body');
+    } finally { await dash.stop(); }
+  });
+
   console.log('\n📊 ' + passed + ' passed, ' + failed + ' failed\n');
   process.exit(failed > 0 ? 1 : 0);
 }
