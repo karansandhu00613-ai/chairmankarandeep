@@ -176,6 +176,28 @@ test('Nothing external runs without passing through the approval gate', () => {
   if (!dash.includes('approvals.deny')) throw new Error('Approvals cannot be denied');
 });
 
+// chairman.js printed its generated owner password to the console on every
+// boot. On Render that console is a log anyone with dashboard access can read,
+// and the disk is wiped every restart, so the password was regenerated within
+// minutes anyway. A credential in a log that does not even work is the worst of
+// both. On such a host it must print instructions, never a password.
+test('The Chairman does not log a password it is about to throw away', () => {
+  const code = fs.readFileSync('/home/user/-chairmankarandeep/chairman.js', 'utf8');
+  if (!code.includes('function ephemeralIdentity()')) {
+    throw new Error('No check for a host that wipes the identity');
+  }
+  const banner = code.slice(code.indexOf("console.log('   CHAIRMAN AGENT OS"));
+  const guard = banner.indexOf('ephemeralIdentity()');
+  const printsPassword = banner.indexOf("'        PASSWORD : '");
+  if (guard === -1) throw new Error('The boot banner does not check for an ephemeral host');
+  if (printsPassword !== -1 && printsPassword < guard) {
+    throw new Error('The password is printed before the ephemeral host is ruled out');
+  }
+  if (!code.includes('ephemeral:ephemeralIdentity()')) {
+    throw new Error('Health does not report that the login will not survive');
+  }
+});
+
 // A model-supplied URL is an untrusted URL, and this runs on a server.
 test('The web layer refuses private addresses and non-http schemes', () => {
   const code = fs.readFileSync('/home/user/-chairmankarandeep/scripts/web.js', 'utf8');

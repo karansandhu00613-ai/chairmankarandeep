@@ -76,11 +76,20 @@ function checkBackend(baseUrl) {
   return new Promise(resolve => {
     const started = Date.now();
     const client = baseUrl.startsWith('https') ? https : http;
-    const done = (online, note) => resolve({ online, ms: Date.now() - started, note });
+    const done = (online, note, health) =>
+      resolve({ online, ms: Date.now() - started, note, health });
 
     const req = client.get(baseUrl + '/api/health', { timeout: 12000 }, r => {
-      r.resume();
-      done(r.statusCode === 200, r.statusCode === 200 ? null : 'HTTP ' + r.statusCode);
+      // The body is already being fetched, so read it rather than discard it: a
+      // service can report more about itself than "alive", and the Chairman
+      // reports whether its login survives a restart.
+      let data = '';
+      r.on('data', d => { if (data.length < 4000) data += d; });
+      r.on('end', () => {
+        let body = null;
+        try { body = JSON.parse(data); } catch (e) { body = null; }
+        done(r.statusCode === 200, r.statusCode === 200 ? null : 'HTTP ' + r.statusCode, body);
+      });
     });
     req.on('error', e => done(false, e.code === 'ENOTFOUND' ? 'not found' : 'unreachable'));
     req.on('timeout', () => { req.destroy(); done(false, 'waking up'); });
@@ -939,6 +948,7 @@ ${bgScript()}
         <h3>Chairman Agent OS</h3>
         <p class="hint">The full system: business factory, domain desk, growth engine,
         missions, skills and agents. It has its own interface and its own login.</p>
+        <div id="chairman-warning" hidden></div>
         <div class="row" style="margin-bottom:14px">
           <button onclick="openChairman()">Open Chairman OS</button>
           <button class="ghost" onclick="loadFeed('monitor-out','/api/chairman/api/health')">Check it is awake</button>
@@ -1034,6 +1044,7 @@ ${bgScript()}
       var brain = data.brain || { providers: [] };
       delete data.brain;
       showBrain(brain);
+      showChairmanWarning(data.chairman && data.chairman.health);
       grid.innerHTML = '';
       Object.keys(data).forEach(function (name) {
         var s = data[name];
@@ -1073,6 +1084,23 @@ ${bgScript()}
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
     return el;
+  }
+
+  // The Chairman OS has its own login. On a host with no disk and no pinned
+  // password it regenerates that login on every restart, so the sign-in cannot
+  // be got past. Say so here rather than letting the button lead to a wall.
+  function showChairmanWarning(health) {
+    var box = document.getElementById('chairman-warning');
+    if (!box) return;
+    if (!health || !health.ephemeral) { box.hidden = true; return; }
+    box.hidden = false;
+    box.className = 'ask';
+    box.innerHTML =
+      '<div class="what">Its login is regenerated on every restart, so you cannot sign in.</div>'
+      + '<div class="meta">This service stores locally on a host with no persistent disk. '
+      + 'Set OWNER_ID and OWNER_PW in the chairman-os service environment and redeploy. '
+      + 'For its data to survive too, set STORE=github with GH_TOKEN and GH_REPO. '
+      + 'CHAIRMAN_OS.md has the steps.</div>';
   }
 
   // Says plainly whether the Chairman can answer at all, and on which provider,
