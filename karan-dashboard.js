@@ -216,7 +216,15 @@ const server = http.createServer(async (req, res) => {
       names.forEach((n, i) => { status[n] = results[i]; });
       // The chat answers from here, so the page needs to know whether a
       // provider key is actually set rather than discovering it on send.
-      status.brain = { providers: llm.configured().map(n => llm.PROVIDERS[n].label) };
+      // all(), not the static table: a provider found in the environment has no
+      // entry there, and a key Karan added must never vanish from this view.
+      const chain = llm.all();
+      status.brain = {
+        providers: llm.configured().map(n => chain[n].label),
+        // Keys that are set but cannot be used, each with the one variable that
+        // would fix it. Silently ignoring a key he added is not acceptable.
+        unusable: llm.unusable()
+      };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(status));
     }
@@ -1220,6 +1228,14 @@ ${bgScript()}
         + list.slice(1).join(', ') + ' automatically.'
       : 'Answering on ' + list[0] + '. Add a second key for automatic failover.';
     if (send) send.disabled = false;
+
+    // A key that was set but cannot be used is named here rather than ignored.
+    var stuck = brain.unusable || [];
+    if (stuck.length) {
+      hint.textContent += ' ' + stuck.length + ' other key'
+        + (stuck.length > 1 ? 's are' : ' is') + ' set but unused: '
+        + stuck.map(function (u) { return u.variable + ' needs ' + u.needs; }).join('; ') + '.';
+    }
   }
 
   async function sendMessage() {

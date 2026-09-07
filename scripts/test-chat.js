@@ -47,7 +47,7 @@ function fakeGemini(replies) {
     req.on('end', () => {
       // The chain asks which models a provider serves before its first call.
       // Answer that here so every test does not have to script it.
-      if (req.url === '/openai/v1/models' || req.url.indexOf('/v1beta/models?') === 0) {
+      if (req.url.split('?')[0].endsWith('/models') || req.url.indexOf('/v1beta/models?') === 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({
           data: [{ id: 'a-chat-model' }],
@@ -216,7 +216,7 @@ async function run() {
       req.on('data', d => b += d);
       req.on('end', () => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        if (req.url === '/openai/v1/models') {
+        if (req.url.split('?')[0].endsWith('/models')) {
           return res.end(JSON.stringify({ data: [{ id: 'a-chat-model' }] }));
         }
         res.end(JSON.stringify({ choices: [{ message: { content: 'Backup answering.' } }] }));

@@ -166,105 +166,83 @@ function shouldFailOver(status) {
       || status === 503 || status === 529;
 }
 
-const PROVIDERS = {
-  gemini: {
-    label: 'Gemini',
-    key: () => process.env.GEMINI_API_KEY || '',
-    async ask(prompt, system) {
-      const base = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
-      let model = process.env.GEMINI_MODEL;
-      if (!model) {
-        const found = await resolveModel('gemini',
-          base + '/v1beta/models?key=' + encodeURIComponent(this.key()), {},
-          body => (body.models || [])
-            // Only models that can actually answer a generateContent call.
-            .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') !== -1)
-            .map(m => String(m.name || '').replace(/^models\//, '')));
-        if (!found.ok) return { ok: false, status: 0, error: found.error, failover: true };
-        model = found.model;
-      }
-      const url = base + '/v1beta/models/'
-        + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(this.key());
-      const body = { contents: [{ parts: [{ text: prompt }] }] };
-      if (system) body.systemInstruction = { parts: [{ text: system }] };
+/*
+ * Providers are found in the environment, not listed by hand here.
+ *
+ * Karan adds keys to Render and expects them used. Every provider below follows
+ * one naming convention, so adding a key is the whole configuration:
+ *
+ *   <NAME>_API_KEY    the key. Its presence is what turns a provider on.
+ *   <NAME>_MODEL      optional; discovered from the provider when unset.
+ *   <NAME>_BASE_URL   optional for a known provider, required for any other.
+ *
+ * A key for a provider this file has never heard of still works: set its
+ * base URL alongside it and it is used as an OpenAI-compatible endpoint, which
+ * nearly all of them are. A key with no base URL and no entry here is NOT
+ * silently ignored — it is reported by unusable(), and the dashboard says which
+ * variable would make it work.
+ */
+const KNOWN = [
+  // cost: 'free' has a usable free tier, 'paid' bills per message. Anything
+  // discovered from the environment is 'unknown' and asked after the free ones,
+  // because a key that was added on purpose is more likely free-tier than it is
+  // to be the most expensive option here.
+  { name: 'groq', label: 'Groq', base: 'https://api.groq.com', prefix: '/openai/v1', cost: 'free' },
+  { name: 'openrouter', label: 'OpenRouter', base: 'https://openrouter.ai/api', prefix: '/v1', cost: 'free' },
+  { name: 'mistral', label: 'Mistral', base: 'https://api.mistral.ai', prefix: '/v1', cost: 'free' },
+  { name: 'deepseek', label: 'DeepSeek', base: 'https://api.deepseek.com', prefix: '/v1', cost: 'paid' },
+  { name: 'openai', label: 'OpenAI', base: 'https://api.openai.com', prefix: '/v1', cost: 'paid',
+    // Paid and its line-up moves; choosing a model there is a decision about
+    // money, so it is never guessed and never discovered.
+    explicitModel: true }
+];
 
-      const res = await post(url, {}, body);
-      if (res.status !== 200) {
-        const msg = (res.body && res.body.error && res.body.error.message) || ('HTTP ' + res.status);
-        return { ok: false, status: res.status, error: msg };
-      }
-      const cand = res.body && res.body.candidates && res.body.candidates[0];
-      const text = cand && cand.content && cand.content.parts
-        && cand.content.parts.map(p => p.text || '').join('').trim();
-      // A 200 carrying nothing is this provider failing, not the request being
-      // wrong, so the next provider is worth asking.
-      if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
-      return { ok: true, text, model };
-    }
-  },
+const RANK = { free: 0, unknown: 1, paid: 2 };
 
-  groq: {
-    label: 'Groq',
-    key: () => process.env.GROQ_API_KEY || '',
+function envName(name, suffix) {
+  return name.toUpperCase().replace(/[^A-Z0-9]/g, '_') + suffix;
+}
+
+/** One OpenAI-compatible provider, built from a table row or from the environment. */
+function compatible(spec) {
+  return {
+    label: spec.label,
+    cost: spec.cost,
+    key: () => process.env[envName(spec.name, '_API_KEY')] || '',
     async ask(prompt, system) {
-      const base = process.env.GROQ_BASE_URL || 'https://api.groq.com';
-      let model = process.env.GROQ_MODEL;
+      const base = process.env[envName(spec.name, '_BASE_URL')] || spec.base;
+      const root = base + (spec.prefix || '/v1');
+      const auth = { Authorization: 'Bearer ' + this.key() };
+
+      let model = process.env[envName(spec.name, '_MODEL')];
+      if (!model && spec.explicitModel) {
+        return {
+          ok: false,
+          status: 0,
+          error: envName(spec.name, '_MODEL') + ' is not set. Put the exact model id your '
+            + spec.label + ' account has access to in that variable.'
+        };
+      }
       if (!model) {
-        const found = await resolveModel('groq', base + '/openai/v1/models',
-          { Authorization: 'Bearer ' + this.key() },
+        const found = await resolveModel(spec.name, root + '/models', auth,
           body => (body.data || []).map(m => String(m.id || '')));
         if (!found.ok) return { ok: false, status: 0, error: found.error, failover: true };
         model = found.model;
       }
-      const messages = [];
-      if (system) messages.push({ role: 'system', content: system });
-      messages.push({ role: 'user', content: prompt });
-
-      const res = await post(base + '/openai/v1/chat/completions',
-        { Authorization: 'Bearer ' + this.key() }, { model, messages });
-
-      if (res.status !== 200) {
-        const msg = (res.body && res.body.error && res.body.error.message) || ('HTTP ' + res.status);
-        return { ok: false, status: res.status, error: msg };
-      }
-      const text = res.body && res.body.choices && res.body.choices[0]
-        && res.body.choices[0].message && res.body.choices[0].message.content;
-      if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
-      return { ok: true, text: text.trim(), model };
-    }
-  },
-
-  openai: {
-    label: 'OpenAI',
-    key: () => process.env.OPENAI_API_KEY || '',
-    async ask(prompt, system) {
-      // No default. OpenAI's line-up moves, and a model id guessed here would
-      // fail with a confusing 404 rather than saying what is actually wrong.
-      const model = process.env.OPENAI_MODEL || '';
-      if (!model) {
-        return {
-          ok: false,
-          status: 0,
-          error: 'OPENAI_MODEL is not set. Put the exact model id your account '
-            + 'has access to in that variable.'
-        };
-      }
-      const base = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
-      const auth = { Authorization: 'Bearer ' + this.key() };
 
       const messages = [];
       if (system) messages.push({ role: 'system', content: system });
       messages.push({ role: 'user', content: prompt });
 
-      let res = await post(base + '/v1/chat/completions', auth, { model, messages });
+      let res = await post(root + '/chat/completions', auth, { model, messages });
 
-      // Newer OpenAI models are served only by the Responses API, and say so
+      // Some newer models are served only by a Responses endpoint and say so
       // rather than answering. Follow that instruction instead of reporting a
       // dead end, so a model this code has never heard of still works.
       if (res.status !== 200 && wantsResponsesApi(res)) {
         const body = { model, input: prompt };
         if (system) body.instructions = system;
-        const alt = await post(base + '/v1/responses', auth, body);
+        const alt = await post(root + '/responses', auth, body);
         if (alt.status === 200) {
           const text = responsesText(alt.body);
           if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
@@ -282,8 +260,88 @@ const PROVIDERS = {
       if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
       return { ok: true, text: text.trim(), model };
     }
+  };
+}
+
+const GEMINI = {
+  label: 'Gemini',
+  cost: 'free',
+  key: () => process.env.GEMINI_API_KEY || '',
+  async ask(prompt, system) {
+    const base = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
+    let model = process.env.GEMINI_MODEL;
+    if (!model) {
+      const found = await resolveModel('gemini',
+        base + '/v1beta/models?key=' + encodeURIComponent(this.key()), {},
+        body => (body.models || [])
+          // Only models that can actually answer a generateContent call.
+          .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') !== -1)
+          .map(m => String(m.name || '').replace(/^models\//, '')));
+      if (!found.ok) return { ok: false, status: 0, error: found.error, failover: true };
+      model = found.model;
+    }
+    const url = base + '/v1beta/models/'
+      + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(this.key());
+    const body = { contents: [{ parts: [{ text: prompt }] }] };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+    const res = await post(url, {}, body);
+    if (res.status !== 200) {
+      const msg = (res.body && res.body.error && res.body.error.message) || ('HTTP ' + res.status);
+      return { ok: false, status: res.status, error: msg };
+    }
+    const cand = res.body && res.body.candidates && res.body.candidates[0];
+    const text = cand && cand.content && cand.content.parts
+      && cand.content.parts.map(p => p.text || '').join('').trim();
+    // A 200 carrying nothing is this provider failing, not the request being
+    // wrong, so the next provider is worth asking.
+    if (!text) return { ok: false, status: 200, error: 'empty response', failover: true };
+    return { ok: true, text, model };
   }
 };
+
+const PROVIDERS = { gemini: GEMINI };
+KNOWN.forEach(spec => { PROVIDERS[spec.name] = compatible(spec); });
+
+/**
+ * Every provider available right now: the table above, plus anything found in
+ * the environment. Rebuilt on each call so a variable added after start-up is
+ * picked up without a redeploy.
+ */
+function all() {
+  const found = Object.assign({}, PROVIDERS);
+  Object.keys(process.env).forEach(varName => {
+    const m = varName.match(/^([A-Z0-9_]+)_API_KEY$/);
+    if (!m || !process.env[varName]) return;
+    const name = m[1].toLowerCase();
+    if (found[name]) return;                                  // already known
+    if (!process.env[m[1] + '_BASE_URL']) return;             // reported by unusable()
+    found[name] = compatible({
+      name,
+      label: m[1].charAt(0) + m[1].slice(1).toLowerCase().replace(/_/g, ' '),
+      base: process.env[m[1] + '_BASE_URL'],
+      prefix: '',      // the base URL is expected to include any version path
+      cost: 'unknown'
+    });
+  });
+  return found;
+}
+
+/**
+ * Keys that were set but cannot be used, and the one variable that would fix
+ * each. A key Karan added should never disappear without explanation.
+ */
+function unusable() {
+  const known = all();
+  const out = [];
+  Object.keys(process.env).forEach(varName => {
+    const m = varName.match(/^([A-Z0-9_]+)_API_KEY$/);
+    if (!m || !process.env[varName]) return;
+    if (known[m[1].toLowerCase()]) return;
+    out.push({ variable: varName, needs: m[1] + '_BASE_URL' });
+  });
+  return out;
+}
 
 function wantsResponsesApi(res) {
   if (res.status !== 400 && res.status !== 404) return false;
@@ -306,16 +364,27 @@ function responsesText(body) {
   return parts.join('').trim();
 }
 
+/**
+ * Who to ask, in order. Free tiers first, then anything found in the
+ * environment whose cost is unknown, then the ones that certainly bill per
+ * message. LLM_ORDER overrides the whole thing when a specific order is wanted.
+ */
 function order() {
-  // Free tiers first. A paid provider is a real cost per message, so it is the
-  // last resort unless LLM_ORDER deliberately puts it first.
-  return (process.env.LLM_ORDER || 'gemini,groq,openai')
-    .split(',').map(s => s.trim().toLowerCase()).filter(n => PROVIDERS[n]);
+  const found = all();
+  const explicit = process.env.LLM_ORDER;
+  if (explicit) {
+    return explicit.split(',').map(x => x.trim().toLowerCase()).filter(n => found[n]);
+  }
+  return Object.keys(found).sort((a, b) => {
+    const byCost = RANK[found[a].cost] - RANK[found[b].cost];
+    return byCost || a.localeCompare(b);
+  });
 }
 
 /** Which providers hold a key. Used to report configuration honestly. */
 function configured() {
-  return order().filter(name => PROVIDERS[name].key());
+  const found = all();
+  return order().filter(name => found[name].key());
 }
 
 /**
@@ -336,8 +405,9 @@ async function ask(prompt, system) {
     };
   }
 
+  const found = all();
   for (const name of names) {
-    const p = PROVIDERS[name];
+    const p = found[name];
     try {
       const out = await p.ask(prompt, system);
       if (out.ok) {
@@ -360,7 +430,9 @@ async function ask(prompt, system) {
   };
 }
 
-module.exports = { ask, configured, order, PROVIDERS, shouldFailOver, forgetModels, pick };
+module.exports = {
+  ask, configured, order, all, unusable, PROVIDERS, shouldFailOver, forgetModels, pick
+};
 
 if (require.main === module) {
   const prompt = process.argv.slice(2).join(' ') || 'Reply with exactly: chain ok';
