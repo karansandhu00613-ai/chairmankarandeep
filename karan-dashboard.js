@@ -76,8 +76,15 @@ function checkBackend(baseUrl) {
   return new Promise(resolve => {
     const started = Date.now();
     const client = baseUrl.startsWith('https') ? https : http;
-    const done = (online, note, health) =>
+    // Every path below must reach done() exactly once. /api/status waits on all
+    // three of these with Promise.all, so a single check that never settles
+    // hangs the whole status endpoint and the page with it.
+    let settled = false;
+    const done = (online, note, health) => {
+      if (settled) return;
+      settled = true;
       resolve({ online, ms: Date.now() - started, note, health });
+    };
 
     const req = client.get(baseUrl + '/api/health', { timeout: 12000 }, r => {
       // The body is already being fetched, so read it rather than discard it: a
@@ -85,11 +92,16 @@ function checkBackend(baseUrl) {
       // reports whether its login survives a restart.
       let data = '';
       r.on('data', d => { if (data.length < 4000) data += d; });
-      r.on('end', () => {
+      const finish = () => {
         let body = null;
         try { body = JSON.parse(data); } catch (e) { body = null; }
         done(r.statusCode === 200, r.statusCode === 200 ? null : 'HTTP ' + r.statusCode, body);
-      });
+      };
+      r.on('end', finish);
+      // A response cut off mid-stream emits close or error and never end. Both
+      // have to settle it, or the service reads as permanently checking.
+      r.on('close', finish);
+      r.on('error', () => done(false, 'connection dropped'));
     });
     req.on('error', e => done(false, e.code === 'ENOTFOUND' ? 'not found' : 'unreachable'));
     req.on('timeout', () => { req.destroy(); done(false, 'waking up'); });
@@ -341,11 +353,25 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+const MAX_BODY = 256 * 1024;
+
+// Bounded, and settles on every ending. A request that is aborted part-way
+// emits neither end nor error, so without the close handler the promise stays
+// pending forever and its handler is never released.
 function readBody(req) {
   return new Promise((resolve) => {
     let body = '';
-    req.on('data', d => body += d);
-    req.on('end', () => resolve(body));
+    let over = false;
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(over ? '' : body); } };
+    req.on('data', d => {
+      if (over) return;
+      body += d;
+      if (body.length > MAX_BODY) { over = true; body = ''; req.destroy(); }
+    });
+    req.on('end', finish);
+    req.on('close', finish);
+    req.on('error', finish);
   });
 }
 
@@ -371,11 +397,21 @@ function proxyRequest(baseUrl, path, method, body) {
       timeout: 75000
     }, res => {
       let data = '';
-      res.on('data', d => data += d);
+      let settled = false;
+      res.on('data', d => { if (data.length < MAX_BODY) data += d; });
       res.on('end', () => {
+        if (settled) return;
+        settled = true;
         let parsed;
         try { parsed = JSON.parse(data); } catch(e) { parsed = { raw: data }; }
         resolve({ status: res.statusCode, data: parsed });
+      });
+      // A backend that dies mid-response emits neither end nor a request error,
+      // so without this the browser waits on a promise that never settles.
+      res.on('error', e => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('Backend connection dropped: ' + e.message));
       });
     });
     req.on('error', reject);
@@ -736,6 +772,9 @@ ${baseStyles()}
   /* Hero. Sits over the WebGL surface, so everything here carries its own
      contrast rather than borrowing it from the background. */
   .hero { padding: 72px 8px 40px; text-align: center; }
+  /* Stated rather than left to the browser default, so adding a display rule
+     to .hero later cannot quietly bring it back on every tab. */
+  .hero[hidden] { display: none; }
   .pill {
     display: inline-flex; align-items: center; gap: 9px;
     padding: 7px 15px 7px 11px; border-radius: 999px;
@@ -765,7 +804,6 @@ ${baseStyles()}
     animation: nudge 2.4s ease-in-out infinite;
   }
   @keyframes nudge { 0%,100% { transform: translateY(0); opacity: .65; } 50% { transform: translateY(5px); opacity: 1; } }
-  @media (max-width: 860px) { .hero { padding: 44px 4px 28px; } }
 
   .section { display: none; }
   .section.active { display: block; animation: fade .45s cubic-bezier(.2,.8,.2,1); }
@@ -847,12 +885,48 @@ ${baseStyles()}
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
   @media (prefers-reduced-motion: reduce) { .steps .st.running .pip { animation: none; } }
 
+  /* On a narrow screen the sidebar stacks above the content, so every pixel it
+     takes pushes the actual panel below the fold. Make it a slim scrolling bar:
+     brand and nav on one line, tighter padding, and the labels KEPT. Hiding
+     them left six near-identical glyphs, and took the approvals badge with them
+     because the badge lives inside the label. */
   @media (max-width: 860px) {
-    .shell { grid-template-columns: 1fr; padding: 14px; }
-    aside { position: static; }
-    aside .nav { display: flex; gap: 8px; overflow-x: auto; }
-    .nav-item { margin-bottom: 0; white-space: nowrap; }
-    .nav-item span:not(.ico) { display: none; }
+    /* minmax(0,1fr), not 1fr: a grid column's automatic minimum is its content
+       width, so the scrolling nav stretched the sidebar to 629px inside a
+       375px screen and took the whole page sideways with it. The same reason
+       the nav itself needs min-width:0 to be allowed to scroll. */
+    /* align-content:start, because .shell has min-height:100vh and a grid
+       stretches its auto rows to fill that by default. Stacked, that made the
+       sidebar grow to absorb the leftover space, so a short panel started
+       130px lower down the page than a tall one. */
+    .shell {
+      grid-template-columns: minmax(0, 1fr);
+      align-content: start;
+      gap: 12px; padding: 12px;
+    }
+    aside {
+      position: sticky; top: 8px; z-index: 5;
+      display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    }
+    aside .brand { font-size: 14px; margin-bottom: 0; flex: none; }
+    aside .nav {
+      display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none;
+      flex: 1 1 0; min-width: 0;
+    }
+    aside .nav::-webkit-scrollbar { display: none; }
+    .nav-item {
+      margin-bottom: 0; white-space: nowrap; padding: 8px 11px;
+      font-size: 13px; gap: 7px;
+    }
+    .nav-item:hover { transform: none; }
+    .topbar { padding: 11px 15px; margin-bottom: 12px; }
+    .topbar h1 { font-size: 16px; }
+    .panel { padding: 18px; margin-bottom: 14px; }
+    .hero { padding: 30px 4px 22px; }
+  }
+  /* Below this the brand and a six-item nav cannot share a line legibly. */
+  @media (max-width: 520px) {
+    aside .brand { display: none; }
   }
 </style>
 </head>
@@ -978,20 +1052,36 @@ ${bgScript()}
   function goSection(name) {
     var item = document.querySelector('.nav-item[data-sec="' + name + '"]');
     if (item) item.click();
+  }
+
+  // The hero belongs to the overview. It used to sit above every section, so
+  // choosing Chat or Approvals showed the headline and left the actual panel
+  // below the fold: the tab looked like it had done nothing.
+  function showSection(name) {
+    document.querySelectorAll('.section').forEach(function (s) { s.classList.remove('active'); });
+    document.querySelectorAll('.nav-item').forEach(function (n) { n.classList.remove('active'); });
+
     var target = document.getElementById(name);
-    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (target) target.classList.add('active');
+    var item = document.querySelector('.nav-item[data-sec="' + name + '"]');
+    if (item) item.classList.add('active');
+
+    var hero = document.getElementById('hero');
+    if (hero) hero.hidden = name !== 'overview';
+
+    document.getElementById('page-title').textContent = TITLES[name] || name;
+    window.scrollTo({ top: 0, behavior: STILL ? 'auto' : 'smooth' });
+    watchReveals();
+
+    // The chat is only useful with the cursor already in it.
+    if (name === 'chat') {
+      var input = document.getElementById('chat-input');
+      if (input && !input.disabled) input.focus();
+    }
   }
 
   document.querySelectorAll('.nav-item').forEach(function (item) {
-    item.addEventListener('click', function () {
-      var name = item.dataset.sec;
-      document.querySelectorAll('.section').forEach(function (s) { s.classList.remove('active'); });
-      document.querySelectorAll('.nav-item').forEach(function (n) { n.classList.remove('active'); });
-      document.getElementById(name).classList.add('active');
-      item.classList.add('active');
-      document.getElementById('page-title').textContent = TITLES[name];
-      watchReveals();
-    });
+    item.addEventListener('click', function () { showSection(item.dataset.sec); });
   });
 
   // Panels rise in as they enter view; tiles take a slight 3D tilt toward the
