@@ -38,7 +38,8 @@ async function test(name, fn) {
 
 /** A models-list call, as opposed to an actual generate call. */
 function isListCall(url) {
-  if (url === '/openai/v1/models') return true;                 // Groq, OpenAI shape
+  const path = url.split('?')[0];
+  if (path.endsWith('/models')) return true;                    // OpenAI-compatible shape
   return url.indexOf('/v1beta/models?') === 0;                  // Gemini shape
 }
 
@@ -358,7 +359,14 @@ async function run() {
         GEMINI_API_KEY: 'k', GEMINI_BASE_URL: gem.url,
         OPENAI_API_KEY: 'sk-test', OPENAI_BASE_URL: oai.url, OPENAI_MODEL: 'm'
       }, async () => {
-        check(llm.order().join() === 'gemini,groq,openai', 'wrong default order: ' + llm.order());
+        // Assert the property, not a fixed list: adding a provider must not
+        // break this test, but putting a paid one before a free one must.
+        const found = llm.all();
+        const costs = llm.order().map(n => found[n].cost);
+        const lastFree = costs.lastIndexOf('free');
+        const firstPaid = costs.indexOf('paid');
+        check(firstPaid === -1 || firstPaid > lastFree,
+          'a paid provider is asked before a free one: ' + llm.order().join());
         const r = await llm.ask('hello');
         check(r.provider === 'Gemini', 'went to the paid provider first: ' + r.provider);
         check(oai.calls.length === 0, 'spent money when a free tier was available');
@@ -485,6 +493,59 @@ async function run() {
         check(/list is down/.test(r.tried[0].error), 'lost the real reason: ' + r.tried[0].error);
       });
     } finally { await gem.close(); await groq.close(); }
+  });
+
+  // ---- Keys found in the environment ----------------------------------------
+  // Karan adds keys to Render and expects them used. A key that cannot be used
+  // must be reported, never silently dropped.
+
+  await test('A key for an unknown provider is used once its base URL is set', async () => {
+    const svc = await fakeProvider([[200, groqText('the unknown provider answered')]]);
+    try {
+      await withEnv({ SOMENEWAI_API_KEY: 'k', SOMENEWAI_BASE_URL: svc.url }, async () => {
+        check(llm.configured().indexOf('somenewai') !== -1,
+          'did not pick the key up: ' + llm.configured().join());
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.text === 'the unknown provider answered', 'wrong text: ' + r.text);
+      });
+    } finally {
+      await svc.close();
+      delete process.env.SOMENEWAI_API_KEY;
+      delete process.env.SOMENEWAI_BASE_URL;
+    }
+  });
+
+  await test('A key with nowhere to send it is reported, not ignored', async () => {
+    await withEnv({ MYSTERYAI_API_KEY: 'k' }, async () => {
+      const stuck = llm.unusable();
+      const mine = stuck.find(u => u.variable === 'MYSTERYAI_API_KEY');
+      check(!!mine, 'the key was silently dropped: ' + JSON.stringify(stuck));
+      check(mine.needs === 'MYSTERYAI_BASE_URL', 'wrong fix named: ' + mine.needs);
+      check(llm.configured().indexOf('mysteryai') === -1, 'tried to use a key with no endpoint');
+    });
+    delete process.env.MYSTERYAI_API_KEY;
+  });
+
+  await test('A known provider is never reported as unusable', async () => {
+    await withEnv({ GROQ_API_KEY: 'k' }, async () => {
+      check(!llm.unusable().some(u => u.variable === 'GROQ_API_KEY'),
+        'a provider it knows was called unusable');
+    });
+  });
+
+  await test('An unknown provider is asked before the ones that certainly bill', async () => {
+    await withEnv({
+      GROQ_API_KEY: 'k', SOMENEWAI_API_KEY: 'k', SOMENEWAI_BASE_URL: 'https://example.test/v1',
+      OPENAI_API_KEY: 'k', OPENAI_MODEL: 'm'
+    }, async () => {
+      const o = llm.order();
+      check(o.indexOf('groq') < o.indexOf('somenewai'), 'free tier not first: ' + o.join());
+      check(o.indexOf('somenewai') < o.indexOf('openai'),
+        'an unknown-cost key was asked after a paid one: ' + o.join());
+    });
+    delete process.env.SOMENEWAI_API_KEY;
+    delete process.env.SOMENEWAI_BASE_URL;
   });
 
   console.log('\n📊 ' + passed + ' passed, ' + failed + ' failed\n');
