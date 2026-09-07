@@ -36,11 +36,23 @@ async function test(name, fn) {
   }
 }
 
+/** A models-list call, as opposed to an actual generate call. */
+function isListCall(url) {
+  if (url === '/openai/v1/models') return true;                 // Groq, OpenAI shape
+  return url.indexOf('/v1beta/models?') === 0;                  // Gemini shape
+}
+
 /**
  * A stand-in provider. `replies` is a queue of [status, body] pairs; each
  * request takes the next one, and the last is reused once the queue runs dry.
+ *
+ * The chain asks a free provider which models it serves before its first call,
+ * so by default this answers that list itself with one ordinary chat model and
+ * does NOT consume the queue. A test that cares about discovery passes its own
+ * `opts.models` reply, and then the list is answered from that instead.
  */
-function fakeProvider(replies) {
+function fakeProvider(replies, opts) {
+  const options = opts || {};
   const calls = [];
   let i = 0;
   const server = http.createServer((req, res) => {
@@ -50,6 +62,16 @@ function fakeProvider(replies) {
       let parsed;
       try { parsed = JSON.parse(body); } catch (e) { parsed = null; }
       calls.push({ url: req.url, auth: req.headers.authorization || '', body: parsed });
+
+      if (isListCall(req.url)) {
+        const list = options.models || {
+          data: [{ id: 'a-chat-model' }],
+          models: [{ name: 'models/a-chat-model', supportedGenerationMethods: ['generateContent'] }]
+        };
+        res.writeHead(options.modelsStatus || 200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(list));
+      }
+
       const [status, payload] = replies[Math.min(i++, replies.length - 1)];
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload));
@@ -66,16 +88,23 @@ function fakeProvider(replies) {
   });
 }
 
+/** The calls that actually asked for an answer, excluding model discovery. */
+const asks = f => f.calls.filter(c => !isListCall(c.url));
+
 const geminiText = t => ({ candidates: [{ content: { parts: [{ text: t }] } }] });
 const groqText = t => ({ choices: [{ message: { content: t } }] });
 
 // The module reads process.env at call time, so each case sets its own world
 // and this restores it afterwards. Requiring llm.js fresh is unnecessary.
 const LLM_VARS = ['GEMINI_API_KEY', 'GROQ_API_KEY', 'OPENAI_API_KEY',
-  'GEMINI_BASE_URL', 'GROQ_BASE_URL', 'OPENAI_BASE_URL', 'OPENAI_MODEL',
+  'GEMINI_BASE_URL', 'GROQ_BASE_URL', 'OPENAI_BASE_URL',
+  'GEMINI_MODEL', 'GROQ_MODEL', 'OPENAI_MODEL',
   'LLM_ORDER', 'LLM_TIMEOUT_MS'];
 
 function withEnv(vars, fn) {
+  // Discovery is cached per provider for the life of the process, which is what
+  // we want in production and exactly wrong between test cases.
+  require(LLM).forgetModels();
   const saved = {};
   LLM_VARS.forEach(k => { saved[k] = process.env[k]; delete process.env[k]; });
   Object.assign(process.env, vars);
@@ -133,7 +162,7 @@ async function run() {
         check(r.tried.length === 1 && r.tried[0].status === 429,
           'did not record why the first provider was skipped');
         check(/Quota exceeded/.test(r.tried[0].error), 'lost the provider reason');
-        check(groq.calls.length === 1, 'backup was called ' + groq.calls.length + ' times');
+        check(asks(groq).length === 1, 'backup was asked ' + asks(groq).length + ' times');
       });
     } finally { await gem.close(); await groq.close(); }
   });
@@ -250,9 +279,9 @@ async function run() {
         GROQ_API_KEY: 'q-key', GROQ_BASE_URL: groq.url
       }, async () => { await llm.ask('hello', 'BE STRICT'); });
 
-      check(JSON.stringify(gem.calls[0].body).includes('BE STRICT'),
+      check(JSON.stringify(asks(gem)[0].body).includes('BE STRICT'),
         'Gemini did not receive the system instruction');
-      const first = groq.calls[0].body.messages[0];
+      const first = asks(groq)[0].body.messages[0];
       check(first.role === 'system' && first.content === 'BE STRICT',
         'Groq did not receive the system instruction');
     } finally { await gem.close(); await groq.close(); }
@@ -353,6 +382,109 @@ async function run() {
         check(r.tried.length === 2, 'wrong number of skipped providers: ' + r.tried.length);
       });
     } finally { await gem.close(); await groq.close(); await oai.close(); }
+  });
+
+  // ---- Model discovery -------------------------------------------------------
+  // Groq deprecated llama-3.3-70b-versatile, which was this file's default, and
+  // a correctly configured key started failing with "the model does not exist".
+  // The fix is not a newer default: it is asking the provider.
+
+  await test('No model id is hardcoded as a default any more', () => {
+    const src = require('fs').readFileSync(LLM, 'utf8');
+    const defaults = src.match(/GROQ_MODEL\s*\|\|\s*'[^']+'|GEMINI_MODEL\s*\|\|\s*'[^']+'/g);
+    check(!defaults, 'a model default is back in the source: ' + defaults);
+    check(!/['"]llama-3\.3-70b-versatile['"]/.test(src),
+      'the deprecated Groq model is back as a value, not just named in a comment');
+  });
+
+  await test('Groq is asked which models it has, and a chat model is chosen', async () => {
+    const groq = await fakeProvider([[200, groqText('picked correctly')]], {
+      models: { data: [
+        { id: 'whisper-large-v3' },
+        { id: 'openai/gpt-oss-20b' },
+        { id: 'openai/gpt-oss-120b' },
+        { id: 'meta-llama/llama-guard-4-12b' }
+      ] }
+    });
+    try {
+      await withEnv({ GROQ_API_KEY: 'q-key', GROQ_BASE_URL: groq.url }, async () => {
+        llm.forgetModels();
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.model === 'openai/gpt-oss-120b', 'chose the wrong model: ' + r.model);
+        check(groq.calls[0].url === '/openai/v1/models', 'did not list first: ' + groq.calls[0].url);
+        check(groq.calls[0].auth === 'Bearer q-key', 'listed without the key');
+        check(groq.calls.length === 2, 'expected list then ask, got ' + groq.calls.length);
+      });
+    } finally { await groq.close(); }
+  });
+
+  await test('Speech and moderation models are never chosen to hold a conversation', () => {
+    check(llm.pick(['whisper-large-v3', 'meta-llama/llama-guard-4-12b', 'some-chat-model'], 'groq')
+      === 'some-chat-model', 'picked a non-chat model');
+    check(llm.pick(['text-embedding-004', 'imagen-3.0', 'gemini-x'], 'gemini') === 'gemini-x',
+      'picked an embedding or image model');
+  });
+
+  await test('A provider that changes its whole line-up still works', () => {
+    // Nothing on the preference list; it must still find something usable.
+    check(llm.pick(['brand-new-model-2027'], 'groq') === 'brand-new-model-2027',
+      'refused an unfamiliar model instead of using it');
+    check(llm.pick(['whisper-only'], 'groq') === null, 'accepted a line-up with no chat model');
+  });
+
+  await test('An explicit model id skips discovery entirely', async () => {
+    const groq = await fakeProvider([[200, groqText('explicit wins')]]);
+    try {
+      await withEnv({
+        GROQ_API_KEY: 'q-key', GROQ_BASE_URL: groq.url, GROQ_MODEL: 'my-exact-choice'
+      }, async () => {
+        llm.forgetModels();
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.model === 'my-exact-choice', 'ignored the explicit model: ' + r.model);
+        check(groq.calls.length === 1, 'listed models when it did not need to');
+        check(groq.calls[0].url === '/openai/v1/chat/completions', 'wrong endpoint');
+      });
+    } finally { await groq.close(); }
+  });
+
+  await test('Gemini only picks a model that can answer generateContent', async () => {
+    const gem = await fakeProvider([[200, geminiText('gemini picked correctly')]], {
+      models: { models: [
+        { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+        { name: 'models/gemini-2.0-flash', supportedGenerationMethods: ['generateContent'] }
+      ] }
+    });
+    try {
+      await withEnv({ GEMINI_API_KEY: 'g-key', GEMINI_BASE_URL: gem.url }, async () => {
+        llm.forgetModels();
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'failed: ' + r.error);
+        check(r.model === 'gemini-2.0-flash', 'chose the wrong model: ' + r.model);
+        check(gem.calls[0].url.indexOf('/v1beta/models?key=') === 0,
+          'did not list first: ' + gem.calls[0].url);
+      });
+    } finally { await gem.close(); }
+  });
+
+  await test('A provider whose list cannot be read fails over instead of stopping', async () => {
+    const gem = await fakeProvider([[200, geminiText('never reached')]],
+      { modelsStatus: 500, models: { error: { message: 'list is down' } } });
+    const groq = await fakeProvider([[200, groqText('backup answered')]],
+      { models: { data: [{ id: 'openai/gpt-oss-120b' }] } });
+    try {
+      await withEnv({
+        GEMINI_API_KEY: 'g', GEMINI_BASE_URL: gem.url,
+        GROQ_API_KEY: 'q', GROQ_BASE_URL: groq.url
+      }, async () => {
+        llm.forgetModels();
+        const r = await llm.ask('hello');
+        check(r.ok === true, 'a failed model list killed the chain: ' + r.error);
+        check(r.provider === 'Groq', 'wrong provider: ' + r.provider);
+        check(/list is down/.test(r.tried[0].error), 'lost the real reason: ' + r.tried[0].error);
+      });
+    } finally { await gem.close(); await groq.close(); }
   });
 
   console.log('\n📊 ' + passed + ' passed, ' + failed + ' failed\n');

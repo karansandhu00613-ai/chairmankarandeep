@@ -62,6 +62,15 @@ function fakeModel(replies) {
     let b = '';
     req.on('data', d => b += d);
     req.on('end', () => {
+      // The chain asks which models a provider serves before its first call.
+      // Answer that here so every test does not have to script it.
+      if (req.url === '/openai/v1/models' || req.url.indexOf('/v1beta/models?') === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          data: [{ id: 'a-chat-model' }],
+          models: [{ name: 'models/a-chat-model', supportedGenerationMethods: ['generateContent'] }]
+        }));
+      }
       prompts.push(b);
       const text = replies[Math.min(i++, replies.length - 1)];
       res.writeHead(200, { 'Content-Type': 'application/json' });
