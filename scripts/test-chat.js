@@ -45,6 +45,15 @@ function fakeGemini(replies) {
     let body = '';
     req.on('data', d => body += d);
     req.on('end', () => {
+      // The chain asks which models a provider serves before its first call.
+      // Answer that here so every test does not have to script it.
+      if (req.url === '/openai/v1/models' || req.url.indexOf('/v1beta/models?') === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          data: [{ id: 'a-chat-model' }],
+          models: [{ name: 'models/a-chat-model', supportedGenerationMethods: ['generateContent'] }]
+        }));
+      }
       calls.push(JSON.parse(body || '{}'));
       const [status, payload] = replies[Math.min(i++, replies.length - 1)];
       res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -207,6 +216,9 @@ async function run() {
       req.on('data', d => b += d);
       req.on('end', () => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (req.url === '/openai/v1/models') {
+          return res.end(JSON.stringify({ data: [{ id: 'a-chat-model' }] }));
+        }
         res.end(JSON.stringify({ choices: [{ message: { content: 'Backup answering.' } }] }));
       });
     });

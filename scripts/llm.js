@@ -15,14 +15,19 @@
  *   GEMINI_API_KEY   Google AI Studio    (free tier)
  *   GROQ_API_KEY     Groq                (free tier)
  *   OPENAI_API_KEY   OpenAI              (paid per message)
- *   GEMINI_MODEL     default gemini-2.0-flash
- *   GROQ_MODEL       default llama-3.3-70b-versatile
+ *   GEMINI_MODEL     optional; discovered from the provider when unset
+ *   GROQ_MODEL       optional; discovered from the provider when unset
  *   OPENAI_MODEL     no default; set the exact model id your account has
  *   LLM_ORDER        comma-separated preference, default "gemini,groq,openai"
  *
- * Model names change constantly, so every one is overridable without touching
- * this file. OpenAI has no default at all: a guessed model id would fail with a
- * confusing 404 instead of saying plainly that nothing was chosen.
+ * Model names change constantly, and a hardcoded default rots: Groq deprecated
+ * this file's old default and a correctly configured key started failing with
+ * "the model does not exist". So the two free providers are ASKED which models
+ * they serve, using the API key that is already set, and an explicit
+ * GEMINI_MODEL or GROQ_MODEL overrides that when a specific one is wanted.
+ *
+ * OpenAI is not discovered and has no default, because it is paid: choosing a
+ * model there is a choice about money, and it belongs to the operator.
  *
  * The default order puts the free tiers first because OpenAI charges per
  * message. Set LLM_ORDER to change that deliberately.
@@ -69,6 +74,91 @@ function post(url, headers, body) {
   });
 }
 
+function get(url, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const proto = u.protocol === 'http:' ? http : https;
+    const req = proto.request({
+      hostname: u.hostname,
+      port: u.port || undefined,
+      path: u.pathname + u.search,
+      method: 'GET',
+      timeout: TIMEOUT,
+      headers: headers || {}
+    }, res => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        let parsed;
+        try { parsed = JSON.parse(data); } catch (e) { parsed = { raw: data.slice(0, 400) }; }
+        resolve({ status: res.statusCode, body: parsed });
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timed out after ' + TIMEOUT + 'ms')); });
+    req.end();
+  });
+}
+
+/*
+ * Which model to use, asked rather than assumed.
+ *
+ * A hardcoded default rots. `llama-3.3-70b-versatile` was this file's Groq
+ * default and Groq has since deprecated it, so a correctly configured key
+ * failed with "the model does not exist" and the only way out was for Karan to
+ * go and read Groq's model list himself. Picking a different id would just
+ * start the same clock again.
+ *
+ * Both free providers publish what they serve, and the API key is the only
+ * credential needed to ask. So ask once per process, cache it, and let an
+ * explicit GROQ_MODEL or GEMINI_MODEL override when he wants a specific one.
+ *
+ * The preference lists are a first choice, not a requirement: anything on them
+ * is used if present, and otherwise the first model the provider offers that
+ * is not obviously the wrong kind is used instead. A provider that changes its
+ * whole line-up still works without a code change.
+ */
+const modelCache = new Map();
+
+// Speech, embedding, moderation and image models answer the list endpoint too,
+// and none of them can hold a conversation.
+const NOT_CHAT = /whisper|tts|embed|guard|moderat|vision-only|image|dall|sora|distil/i;
+
+const PREFERRED = {
+  groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+  gemini: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+};
+
+function pick(ids, provider) {
+  const usable = ids.filter(id => id && !NOT_CHAT.test(id));
+  const first = (PREFERRED[provider] || []).find(p => usable.indexOf(p) !== -1);
+  return first || usable[0] || null;
+}
+
+async function resolveModel(provider, listUrl, headers, extract) {
+  if (modelCache.has(provider)) return modelCache.get(provider);
+  let out;
+  try {
+    const res = await get(listUrl, headers);
+    if (res.status !== 200) {
+      const msg = (res.body && res.body.error && res.body.error.message) || ('HTTP ' + res.status);
+      out = { ok: false, error: 'Could not ask ' + provider + ' which models it has: ' + msg };
+    } else {
+      const chosen = pick(extract(res.body), provider);
+      out = chosen
+        ? { ok: true, model: chosen }
+        : { ok: false, error: provider + ' listed no model this chain can hold a conversation with.' };
+    }
+  } catch (e) {
+    out = { ok: false, error: 'Could not reach ' + provider + ' to list its models: ' + e.message };
+  }
+  modelCache.set(provider, out);
+  return out;
+}
+
+/** Test seam, and a way to pick up a provider's new line-up without a restart. */
+function forgetModels() { modelCache.clear(); }
+
 // A spent free tier, a rate limit, or a temporary outage: all worth moving on
 // from. A malformed request is not — that would fail identically everywhere.
 function shouldFailOver(status) {
@@ -81,8 +171,18 @@ const PROVIDERS = {
     label: 'Gemini',
     key: () => process.env.GEMINI_API_KEY || '',
     async ask(prompt, system) {
-      const model = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
       const base = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
+      let model = process.env.GEMINI_MODEL;
+      if (!model) {
+        const found = await resolveModel('gemini',
+          base + '/v1beta/models?key=' + encodeURIComponent(this.key()), {},
+          body => (body.models || [])
+            // Only models that can actually answer a generateContent call.
+            .filter(m => (m.supportedGenerationMethods || []).indexOf('generateContent') !== -1)
+            .map(m => String(m.name || '').replace(/^models\//, '')));
+        if (!found.ok) return { ok: false, status: 0, error: found.error, failover: true };
+        model = found.model;
+      }
       const url = base + '/v1beta/models/'
         + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(this.key());
       const body = { contents: [{ parts: [{ text: prompt }] }] };
@@ -107,12 +207,19 @@ const PROVIDERS = {
     label: 'Groq',
     key: () => process.env.GROQ_API_KEY || '',
     async ask(prompt, system) {
-      const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+      const base = process.env.GROQ_BASE_URL || 'https://api.groq.com';
+      let model = process.env.GROQ_MODEL;
+      if (!model) {
+        const found = await resolveModel('groq', base + '/openai/v1/models',
+          { Authorization: 'Bearer ' + this.key() },
+          body => (body.data || []).map(m => String(m.id || '')));
+        if (!found.ok) return { ok: false, status: 0, error: found.error, failover: true };
+        model = found.model;
+      }
       const messages = [];
       if (system) messages.push({ role: 'system', content: system });
       messages.push({ role: 'user', content: prompt });
 
-      const base = process.env.GROQ_BASE_URL || 'https://api.groq.com';
       const res = await post(base + '/openai/v1/chat/completions',
         { Authorization: 'Bearer ' + this.key() }, { model, messages });
 
@@ -253,7 +360,7 @@ async function ask(prompt, system) {
   };
 }
 
-module.exports = { ask, configured, order, PROVIDERS, shouldFailOver };
+module.exports = { ask, configured, order, PROVIDERS, shouldFailOver, forgetModels, pick };
 
 if (require.main === module) {
   const prompt = process.argv.slice(2).join(' ') || 'Reply with exactly: chain ok';
