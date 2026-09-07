@@ -47,18 +47,60 @@ chat endpoint. The chain notices that refusal and retries on the right endpoint
 by itself, so a model released after this code was written still works without
 a code change.
 
+### gpt-6-astra
+
+Karan's chosen model, released 3 September 2026. Checked against this chain on
+7 September 2026:
+
+| | |
+|---|---|
+| Model id | `gpt-6-astra` |
+| Context | 1,050,000 tokens |
+| Max output | 128,000 tokens |
+| Price | $10 per million input, $50 per million output (USD) |
+
+Retrieved from OpenAI's model page and pricing listings, 7 September 2026.
+
+**It works on the endpoint this chain uses.** The model supports Chat
+Completions, Responses and Batch. Chat Completions is supported for plain text,
+which is all this chain sends — a system message and a user message, no tools
+and no function calling. Tool calling on this model would require the Responses
+API, and if OpenAI ever refuses the chat endpoint the chain reads that refusal
+and retries on Responses by itself.
+
 **OpenAI is asked last by default, because it charges per message.** The two
 free tiers are tried first, and it answers only when both are spent or absent.
-That is the free-first rule holding. If you want OpenAI answering first, that is
+That is the free-first rule holding. If you want Astra answering first, that is
 your call to make deliberately:
 
 ```
 LLM_ORDER=openai,gemini,groq
 ```
 
-Set that and every message costs money, including the second call the Chairman
-makes after you approve a web fetch, and every sub-agent in a scout run. A
-single scout run is roughly six calls.
+### What Astra costs, if you put it first
+
+Estimates, not measured bills. The prompt sizes are real, counted from the
+files. The reply lengths are assumed, and a rough four-characters-per-token
+conversion is used, so treat these as the right order of magnitude rather than
+an invoice.
+
+The Chairman's standing orders are 2,648 characters, about 662 tokens, and they
+are sent with **every** message. The five sub-agent briefs come to about 1,141
+tokens between them.
+
+| Action | Calls | Rough cost (USD) |
+|---|---|---|
+| One chat message | 1 | about 2 cents |
+| A message where you approve a web fetch | 2 | about 6 cents |
+| One scout run, two ideas | 9 | about 25 cents |
+
+Assumes a 300-token reply per call, a 400-token reply per sub-agent, and 45
+posts of evidence going to the analyst. A scout run is nine calls, not six:
+one analyst, then market check, build plan, monetisation and reviewer for each
+of two ideas.
+
+Left in the default order, all of that stays free until both free tiers are
+spent, and Astra only picks up what they drop.
 
 ## What failover actually does
 
