@@ -8,6 +8,8 @@ const llm = require('./scripts/llm');
 const chat = require('./scripts/chat');
 const approvals = require('./scripts/approvals');
 const agents = require('./scripts/agents');
+const mail = require('./scripts/mail');
+const triage = require('./scripts/mail-triage');
 
 const PORT = parseInt(process.env.PORT || '8000');
 const KARAN_API = process.env.KARAN_API || 'http://localhost:9000';
@@ -146,7 +148,7 @@ function getSetupHTML() {
 
 // HTTP Server
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, 'http://x');
+  const { pathname, searchParams } = new URL(req.url, 'http://x');
   const sessionId = (req.headers.cookie || '').match(/sessionId=([^;]+)/)?.[1];
   const userId = verifySession(sessionId);
 
@@ -269,6 +271,64 @@ const server = http.createServer(async (req, res) => {
       const out = verb === 'approve' ? await approvals.approve(id) : approvals.deny(id);
       res.writeHead(out.ok ? 200 : 400, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify(out));
+    }
+
+    /* ---------------------------------------------------------------- *
+     * Email.
+     *
+     * Reading and sorting run on their own: GET /api/mail opens the mailbox
+     * read-only and comes back with the unread messages already summarised and
+     * ranked. Drafting runs on its own too. Sending does not — it becomes an
+     * approval, and the existing queue is what actually sends it. So the split
+     * is: the machine does the reading, the sorting and the writing, and Karan
+     * does one tap per message that leaves.
+     * ---------------------------------------------------------------- */
+    if (pathname === '/api/mail' && req.method === 'GET') {
+      if (!mail.configured()) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({
+          ok: false,
+          needs: mail.missing(),
+          error: 'Email is not connected yet. Set ' + mail.missing().join(' and ')
+            + ' on Render. For Gmail, MAIL_PASS must be an app password.'
+        }));
+      }
+      const limit = Math.min(25, Math.max(1, Number(searchParams.get('limit')) || 10));
+      const inbox = await triage.triage(limit);
+      res.writeHead(inbox.ok ? 200 : 502, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(inbox));
+    }
+
+    // Write a reply. This produces text and nothing else; it does not queue and
+    // it does not send, so he can throw the draft away at no cost.
+    if (pathname === '/api/mail/draft' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let body = {};
+      try { body = JSON.parse(raw); } catch (e) { body = {}; }
+      if (!body.message || !body.message.from) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Which message should I reply to?' }));
+      }
+      const written = await triage.draft(body.message, String(body.instruction || '').slice(0, 500));
+      res.writeHead(written.ok ? 200 : 502, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(written));
+    }
+
+    // Queue a send. The reply he can see on the card is the reply that goes out.
+    if (pathname === '/api/mail/queue' && req.method === 'POST') {
+      const raw = await readBody(req);
+      let body = {};
+      try { body = JSON.parse(raw); } catch (e) { body = {}; }
+      const text = String(body.body || '').trim();
+      if (!text) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'There is nothing to send.' }));
+      }
+      const item = body.message && body.message.from
+        ? triage.queueReply(body.message, text)
+        : triage.queueSend(body.to, body.subject, text);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, approval: item }));
     }
 
     // The business scout. Starting it is Karan pressing the button with the
@@ -886,6 +946,34 @@ ${baseStyles()}
   .ask button { padding: 8px 16px; font-size: 13px; }
   .ask.settled { border-color: var(--line); background: #fdf8ef; opacity: .85; }
   .ask.settled .row { display: none; }
+  .mail {
+    border: 1px solid var(--line); background: var(--paper);
+    border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
+  }
+  /* The urgent ones are the point of the whole tab, so they carry the accent. */
+  .mail.u5, .mail.u4 { border-color: rgba(155,27,48,.35); background: var(--accent-soft); }
+  .mail.noise { opacity: .68; }
+  .mail .top { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; margin-bottom: 3px; }
+  .mail .subject { font-weight: 600; color: var(--ink); }
+  /* An address has no spaces to wrap at, so it may break anywhere. Ordinary
+     prose may not, or it reads as "nothing has been sen t" on a phone. */
+  .mail .who { font-size: 12px; color: var(--muted); word-break: break-all; }
+  .mail .note { font-size: 12px; color: var(--muted); }
+  .mail .gist { font-size: 13.5px; color: var(--ink-soft); margin: 6px 0 10px; }
+  .mail .tag {
+    display: inline-block; padding: 1px 8px; border-radius: 8px; font-size: 10.5px;
+    font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    border: 1px solid var(--line); background: var(--paper); color: var(--muted); flex: none;
+  }
+  .mail .tag.hot { border-color: rgba(155,27,48,.4); color: var(--accent); }
+  .mail textarea {
+    width: 100%; box-sizing: border-box; min-height: 136px; margin: 4px 0 10px;
+    padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px;
+    background: var(--paper); color: var(--ink); font: inherit; font-size: 13.5px;
+    line-height: 1.55; resize: vertical;
+  }
+  .mail .row { justify-content: flex-start; }
+  .mail button { padding: 8px 15px; font-size: 13px; }
   .verdict {
     display: inline-block; padding: 2px 9px; border-radius: 8px; font-size: 11px;
     font-weight: 700; letter-spacing: .04em; border: 1px solid var(--line);
@@ -957,6 +1045,7 @@ ${bgScript()}
       <div class="nav-item active" data-sec="overview"><span class="ico">◈</span><span>Overview</span></div>
       <div class="nav-item" data-sec="chat"><span class="ico">✦</span><span>Chat</span></div>
       <div class="nav-item" data-sec="approvals"><span class="ico">◆</span><span>Approvals<span id="approval-badge" class="badge" hidden>0</span></span></div>
+      <div class="nav-item" data-sec="mail"><span class="ico">✉</span><span>Email<span id="mail-badge" class="badge" hidden>0</span></span></div>
       <div class="nav-item" data-sec="scout"><span class="ico">⌖</span><span>Scout</span></div>
       <div class="nav-item" data-sec="monitor"><span class="ico">▤</span><span>Chairman OS</span></div>
       <div class="nav-item" data-sec="voice"><span class="ico">◉</span><span>Voice</span></div>
@@ -1017,6 +1106,20 @@ ${bgScript()}
       </div>
     </section>
 
+    <section id="mail" class="section">
+      <div class="panel card reveal">
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+          <h3 style="margin:0">Inbox</h3>
+          <button id="mail-refresh" onclick="loadMail()">Check mail</button>
+        </div>
+        <p class="hint">Unread mail, read without marking it read, sorted by what
+        actually needs you. Replies are written for you. Nothing is sent until you
+        approve it on the Approvals tab.</p>
+        <div id="mail-status" class="hint"></div>
+        <div id="mail-list"><p class="hint">Press Check mail.</p></div>
+      </div>
+    </section>
+
     <section id="scout" class="section">
       <div class="panel card reveal">
         <h3>Business scout</h3>
@@ -1062,7 +1165,7 @@ ${bgScript()}
 
 <script>
   var TITLES = { overview: 'Overview', chat: 'Chat', approvals: 'Approvals',
-    scout: 'Scout', monitor: 'Chairman OS', voice: 'Voice' };
+    mail: 'Email', scout: 'Scout', monitor: 'Chairman OS', voice: 'Voice' };
   var CHAIRMAN_URL = '${CHAIRMAN_API}';
 
   function goSection(name) {
@@ -1392,6 +1495,159 @@ ${bgScript()}
         data.history.forEach(function (item) { hist.appendChild(askCard(item, false)); });
       }
     } catch (e) { /* the status poll already reports connectivity */ }
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Email.
+   *
+   * Everything here is built with textContent, never innerHTML. The subject
+   * and body of an email are written by strangers, so treating them as markup
+   * would let any sender put script on this page.
+   * ---------------------------------------------------------------- */
+
+  function mailCard(m) {
+    var el = document.createElement('div');
+    el.className = 'mail u' + m.urgency + (m.category === 'noise' ? ' noise' : '');
+
+    var top = document.createElement('div');
+    top.className = 'top';
+    var tag = document.createElement('span');
+    tag.className = 'tag' + (m.urgency >= 4 ? ' hot' : '');
+    tag.textContent = m.category;
+    var subject = document.createElement('span');
+    subject.className = 'subject';
+    subject.textContent = m.subject;
+    top.appendChild(tag);
+    top.appendChild(subject);
+    el.appendChild(top);
+
+    var who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = m.from + (m.date ? '  ·  ' + m.date : '');
+    el.appendChild(who);
+
+    var gist = document.createElement('div');
+    gist.className = 'gist';
+    gist.textContent = m.summary + (m.why ? '  (' + m.why + ')' : '');
+    el.appendChild(gist);
+
+    var box = document.createElement('textarea');
+    box.placeholder = 'The reply will be written here.';
+    box.hidden = true;
+    var note = document.createElement('div');
+    note.className = 'note';
+
+    var row = document.createElement('div');
+    row.className = 'row';
+
+    var write = document.createElement('button');
+    write.textContent = m.needsReply ? 'Write the reply' : 'Write a reply anyway';
+    if (!m.needsReply) write.className = 'ghost';
+
+    var queue = document.createElement('button');
+    queue.textContent = 'Queue for approval';
+    queue.hidden = true;
+
+    write.onclick = async function () {
+      write.disabled = true;
+      note.textContent = 'Writing...';
+      try {
+        var res = await fetch('/api/mail/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: m, instruction: box.value.trim() })
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.ok) {
+          note.textContent = data.error || ('Failed with status ' + res.status);
+        } else {
+          box.hidden = false;
+          box.value = data.body;
+          queue.hidden = false;
+          write.textContent = 'Rewrite it';
+          note.textContent = 'A draft, not a message. Edit it, then queue it. '
+            + 'Written by ' + (data.provider || 'a model') + '.';
+        }
+      } catch (e) {
+        note.textContent = 'Could not reach the dashboard: ' + e.message;
+      }
+      write.disabled = false;
+    };
+
+    queue.onclick = async function () {
+      var body = box.value.trim();
+      if (!body) { note.textContent = 'There is nothing to send.'; return; }
+      queue.disabled = true;
+      note.textContent = 'Queueing...';
+      try {
+        var res = await fetch('/api/mail/queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: m, body: body })
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok || !data.ok) {
+          note.textContent = data.error || ('Failed with status ' + res.status);
+          queue.disabled = false;
+        } else {
+          note.textContent = 'Waiting on the Approvals tab. Nothing has been sent.';
+          box.disabled = true;
+          write.hidden = true;
+          refreshApprovals();
+        }
+      } catch (e) {
+        note.textContent = 'Could not reach the dashboard: ' + e.message;
+        queue.disabled = false;
+      }
+    };
+
+    row.appendChild(write);
+    row.appendChild(queue);
+    el.appendChild(box);
+    el.appendChild(row);
+    el.appendChild(note);
+    return el;
+  }
+
+  async function loadMail() {
+    var list = document.getElementById('mail-list');
+    var status = document.getElementById('mail-status');
+    var badge = document.getElementById('mail-badge');
+    var button = document.getElementById('mail-refresh');
+    button.disabled = true;
+    status.textContent = 'Opening the mailbox...';
+    try {
+      var res = await fetch('/api/mail?limit=10');
+      var data = await res.json().catch(function () { return {}; });
+
+      if (!data.ok) {
+        list.innerHTML = '';
+        status.textContent = data.error || ('Failed with status ' + res.status);
+        return;
+      }
+
+      list.innerHTML = '';
+      if (!data.messages.length) {
+        status.textContent = 'Nothing unread in ' + (data.checked || 'the mailbox') + '.';
+      } else {
+        var needing = data.messages.filter(function (m) { return m.needsReply; }).length;
+        status.textContent = data.messages.length + ' unread'
+          + (data.unreadTotal > data.messages.length
+            ? ' shown of ' + data.unreadTotal : '')
+          + ', ' + needing + ' needing a reply'
+          + (data.sorted ? ', sorted by ' + (data.provider || 'a model') : '')
+          + '. Still marked unread in your mailbox.'
+          + (data.note ? '  ' + data.note : '');
+        data.messages.forEach(function (m) { list.appendChild(mailCard(m)); });
+      }
+      if (badge) {
+        badge.hidden = !data.messages.length;
+        badge.textContent = data.messages.length;
+      }
+    } catch (e) {
+      status.textContent = 'Could not reach the dashboard: ' + e.message;
+    }
+    button.disabled = false;
   }
   refreshApprovals();
   setInterval(refreshApprovals, 15000);
